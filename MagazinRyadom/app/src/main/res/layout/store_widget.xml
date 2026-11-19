@@ -1,0 +1,59 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="12dp"
+    android:background="#17191E">
+
+    <TextView
+        android:id="@+id/widget_header"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="БЛИЖАЙШИЙ МАГАЗИН"
+        android:textColor="#B9BBC2"
+        android:textSize="10sp"
+        android:letterSpacing="0.08"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/widget_name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Открой приложение"
+        android:textColor="#FFFFFF"
+        android:textSize="17sp"
+        android:textStyle="bold"
+        android:maxLines="1"
+        android:ellipsize="end" />
+
+    <TextView
+        android:id="@+id/widget_address"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Найди магазин, чтобы увидеть его здесь"
+        android:textColor="#B9BBC2"
+        android:textSize="11sp"
+        android:maxLines="2"
+        android:ellipsize="end" />
+
+    <ImageView
+        android:id="@+id/widget_map"
+        android:layout_width="match_parent"
+        android:layout_height="75dp"
+        android:layout_marginTop="7dp"
+        android:scaleType="centerCrop"
+        android:background="#292D34"
+        android:contentDescription="Мини-карта с вашим местоположением и магазином" />
+
+    <TextView
+        android:id="@+id/widget_distance"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="5dp"
+        android:text="Расстояние появится после поиска"
+        android:textColor="#D6B45A"
+        android:textSize="12sp"
+        android:textStyle="bold" />
+</LinearLayout>
