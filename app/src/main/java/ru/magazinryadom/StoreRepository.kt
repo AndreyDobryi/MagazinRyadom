@@ -16,13 +16,15 @@ import kotlin.math.sqrt
 /** Поиск филиалов по бренду/оператору и данным OpenStreetMap. */
 object StoreRepository {
     private const val PHOTON = "https://photon.komoot.io/api/"
-    private const val USER_AGENT = "MagazinRyadom/1.8.0 (Android; OpenStreetMap client)"
+    private const val USER_AGENT = "MagazinRyadom/1.8.2 (Android; OpenStreetMap client)"
     private const val SEARCH_RADIUS = 12000.0
     private const val MAX_RESULTS = 60
+    // Prefer the VK Maps / Mail.ru public Overpass instance, which explicitly
+    // welcomes app usage. Keep other instances as sequential fallbacks only.
     private val overpassEndpoints = listOf(
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter",
-        "https://overpass.private.coffee/api/interpreter"
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter",
+        "https://overpass-api.de/api/interpreter"
     )
 
     private val networkAliases = mapOf(
@@ -92,7 +94,8 @@ object StoreRepository {
             }
         }
         if (osm.isFailure && !photonAvailable && local.isEmpty()) {
-            throw Exception("Картографические серверы сейчас не отвечают. Проверь интернет и попробуй ещё раз через минуту.")
+            val reason = osm.exceptionOrNull()?.message ?: "нет ответа от Overpass"
+            throw Exception("Не удалось выполнить поиск магазинов: $reason. Проверь GPS и попробуй позже.", osm.exceptionOrNull())
         }
 
         return (osmStores + photon + local)
@@ -160,11 +163,12 @@ object StoreRepository {
         }
 
         var lastError: Exception? = null
+        val endpointErrors = mutableListOf<String>()
         for (endpoint in overpassEndpoints) {
             val connection = URL(endpoint).openConnection() as HttpURLConnection
             try {
-                connection.connectTimeout = 7000
-                connection.readTimeout = 18000
+                connection.connectTimeout = 10000
+                connection.readTimeout = 25000
                 connection.requestMethod = "POST"
                 connection.doOutput = true
                 connection.setRequestProperty("User-Agent", USER_AGENT)
@@ -172,7 +176,15 @@ object StoreRepository {
                 val payload = "data=" + URLEncoder.encode(queryText, "UTF-8")
                 connection.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
                 val code = connection.responseCode
-                if (code !in 200..299) throw Exception("Overpass HTTP $code")
+                if (code !in 200..299) {
+                    val label = when (code) {
+                        429 -> "ограничение частоты запросов (HTTP 429)"
+                        502, 503, 504 -> "сервер перегружен (HTTP $code)"
+                        403, 406 -> "сервер отклонил запрос (HTTP $code)"
+                        else -> "HTTP $code"
+                    }
+                    throw Exception(label)
+                }
                 val elements = JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optJSONArray("elements") ?: JSONArray()
                 val found = mutableListOf<Store>()
                 for (i in 0 until elements.length()) {
@@ -194,9 +206,14 @@ object StoreRepository {
                 return found
             } catch (e: Exception) {
                 lastError = e
+                endpointErrors += "${endpoint.substringAfter("https://").substringBefore("/")}: ${e.message ?: "ошибка подключения"}"
             } finally { connection.disconnect() }
         }
-        throw lastError ?: Exception("Серверы поиска магазинов не ответили")
+        val detail = endpointErrors.distinct().joinToString("; ")
+        throw Exception(
+            if (detail.isBlank()) "Не удалось получить ответ от серверов поиска магазинов. Попробуй позже."
+            else "Сервисы поиска магазинов временно недоступны. Причины: $detail"
+        , lastError)
     }
 
     private fun parsePhotonResults(body: String, lat: Double?, lon: Double?): List<Store> {

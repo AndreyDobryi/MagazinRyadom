@@ -118,7 +118,7 @@ object MapTile {
         return try {
             connection.connectTimeout = 5000
             connection.readTimeout = 7000
-            connection.setRequestProperty("User-Agent", "MagazinRyadom/1.8.0 (Android)")
+            connection.setRequestProperty("User-Agent", "MagazinRyadom/1.8.2 (Android)")
             if (connection.responseCode !in 200..299) null
             else {
                 val decoded = connection.inputStream.use { BitmapFactory.decodeStream(it) } ?: return null

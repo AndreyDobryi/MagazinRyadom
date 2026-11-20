@@ -94,10 +94,9 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi(savedInstanceState)
-        // Always start with a fresh GPS fix. A previously entered manual address
-        // must never silently replace the phone's real location on next launch.
-        manualLocationMode = false
-        locate()
+        // Keep a manually selected point between launches. This is important when
+        // the phone reports a clearly wrong GPS position (for example, an airport).
+        restoreManualLocationOrLocate()
     }
 
     private fun buildUi(savedInstanceState: Bundle?) {
@@ -652,6 +651,29 @@ class MainActivity : Activity() {
             }
         }
         dialog.show()
+    }
+
+    private fun restoreManualLocationOrLocate() {
+        val prefs = getSharedPreferences("manual_location", MODE_PRIVATE)
+        val lat = prefs.getString("lat", null)?.toDoubleOrNull()
+        val lon = prefs.getString("lon", null)?.toDoubleOrNull()
+        if (lat != null && lon != null && lat in -90.0..90.0 && lon in -180.0..180.0) {
+            val saved = Location("manual_saved").apply {
+                latitude = lat
+                longitude = lon
+                accuracy = 0f
+                time = System.currentTimeMillis()
+            }
+            setCurrentLocation(saved, manual = true)
+            info.text = "Используем выбранную тобой точку: ${prefs.getString("label", "место")}. Чтобы проверить GPS, нажми «Обновить GPS»."
+            val network = getSharedPreferences("chosen", MODE_PRIVATE).getString("network", null)
+            if (!network.isNullOrBlank()) {
+                input.setText(network)
+                searchStores(network)
+            }
+        } else {
+            locate()
+        }
     }
 
     private fun locate() {
