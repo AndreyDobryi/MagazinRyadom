@@ -1,4 +1,100 @@
 package ru.magazinryadom
-import android.webkit.*
-import org.json.*
-object MapPage { fun show(w:WebView,la:Double,lo:Double,stores:List<Store>){w.settings.javaScriptEnabled=true;w.settings.domStorageEnabled=true;w.webViewClient=WebViewClient();val a=JSONArray();stores.forEach{a.put(JSONObject().put("n",it.name).put("a",it.address).put("lat",it.lat).put("lon",it.lon))};val html="""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><style>html,body,#map{height:100%;margin:0;background:#242830}</style></head><body><div id="map"></div><script>let u=[$la,$lo],m=L.map('map').setView(u,15);L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(m);L.circleMarker(u,{radius:8,color:'white',weight:3,fillColor:'#2675df',fillOpacity:1}).addTo(m).bindPopup('Вы здесь');let s=$a;s.forEach(x=>L.marker([x.lat,x.lon]).addTo(m).bindPopup(x.n+'<br>'+x.a));if(s.length)m.fitBounds(L.latLngBounds([u],s.map(x=>[x.lat,x.lon])).pad(.2));</script></body></html>""";w.loadDataWithBaseURL("https://map.local/",html,"text/html","UTF-8",null)}}
+
+import android.content.Context
+import android.view.ViewGroup
+import org.maplibre.android.MapLibre
+import org.maplibre.android.module.http.HttpRequestUtil
+import okhttp3.OkHttpClient
+import org.maplibre.android.camera.CameraPosition
+import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.maps.MapView
+import org.maplibre.android.maps.MapLibreMap
+import org.maplibre.android.maps.Style
+import org.maplibre.android.annotations.MarkerOptions
+
+/** Нативная карта MapLibre. Базовый стиль использует растровые тайлы OSM. */
+class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
+    val view: MapView
+    private var map: MapLibreMap? = null
+    private var styleReady = false
+    private var pendingUser: LatLng? = null
+    private var pendingStores: List<Store> = emptyList()
+
+    init {
+        MapLibre.getInstance(context.applicationContext)
+        HttpRequestUtil().setOkHttpClient(
+            OkHttpClient.Builder().addInterceptor { chain ->
+                val request = chain.request().newBuilder()
+                    .header("User-Agent", "MagazinRyadom/1.4 (Android app)")
+                    .build()
+                chain.proceed(request)
+            }.build()
+        )
+        view = MapView(context)
+        view.layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            (230 * context.resources.displayMetrics.density).toInt()
+        )
+        view.onCreate(savedInstanceState)
+        view.getMapAsync { mapboxMap ->
+            map = mapboxMap
+            mapboxMap.setStyle(Style.Builder().fromJson(styleJson())) {
+                styleReady = true
+                renderPending()
+            }
+        }
+    }
+
+    fun show(latitude: Double, longitude: Double, stores: List<Store>) {
+        pendingUser = LatLng(latitude, longitude)
+        pendingStores = stores
+        renderPending()
+    }
+
+    private fun renderPending() {
+        val activeMap = map ?: return
+        if (!styleReady) return
+        val user = pendingUser ?: return
+        activeMap.clear()
+        activeMap.addMarker(MarkerOptions().position(user).title("Вы здесь"))
+        pendingStores.forEach { store ->
+            activeMap.addMarker(
+                MarkerOptions()
+                    .position(LatLng(store.lat, store.lon))
+                    .title(store.name)
+                    .snippet(store.address)
+            )
+        }
+        val target = pendingStores.firstOrNull()?.let { LatLng(it.lat, it.lon) } ?: user
+        activeMap.setCameraPosition(CameraPosition.Builder()
+            .target(target)
+            .zoom(if (pendingStores.isEmpty()) 14.5 else 13.5)
+            .build())
+    }
+
+    fun onStart() = view.onStart()
+    fun onResume() = view.onResume()
+    fun onPause() = view.onPause()
+    fun onStop() = view.onStop()
+    fun onDestroy() = view.onDestroy()
+    fun onLowMemory() = view.onLowMemory()
+    fun onSaveInstanceState(outState: android.os.Bundle) = view.onSaveInstanceState(outState)
+
+    private fun styleJson(): String = """
+        {
+          "version": 8,
+          "name": "OpenStreetMap raster",
+          "sources": {
+            "osm": {
+              "type": "raster",
+              "tiles": ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+              "tileSize": 256,
+              "attribution": "© OpenStreetMap contributors"
+            }
+          },
+          "layers": [
+            {"id": "osm-raster", "type": "raster", "source": "osm", "minzoom": 0, "maxzoom": 19}
+          ]
+        }
+    """.trimIndent()
+}

@@ -8,7 +8,10 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.net.Uri
 import android.os.Bundle
-import android.webkit.WebView
+import android.os.Handler
+import android.os.Looper
+import android.text.Editable
+import android.text.TextWatcher
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -25,21 +28,27 @@ import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
     private val executor = Executors.newSingleThreadExecutor()
+    private val handler = Handler(Looper.getMainLooper())
     private val locationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
     private lateinit var input: EditText
     private lateinit var info: TextView
     private lateinit var results: LinearLayout
-    private lateinit var map: WebView
+    private lateinit var suggestions: LinearLayout
+    private lateinit var routeButton: Button
+    private lateinit var mapPage: MapPage
     private var currentLocation: Location? = null
+    private var selectedStore: Store? = null
+    private var suggestionTask: Runnable? = null
+    private var lastSuggestionRequest = 0L
     private val locationRequestCode = 22
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        buildUi()
+        buildUi(savedInstanceState)
         if (hasLocationPermission()) locate() else requestLocationPermission()
     }
 
-    private fun buildUi() {
+    private fun buildUi(savedInstanceState: Bundle?) {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(12))
@@ -54,14 +63,31 @@ class MainActivity : Activity() {
             setTextColor(0xFFFFFFFF.toInt())
             setTypeface(null, android.graphics.Typeface.BOLD)
         })
+        content.addView(TextView(this).apply {
+            text = "Поиск магазинов на карте OpenStreetMap"
+            textSize = 13f
+            setTextColor(0xFFAAAAAA.toInt())
+        })
 
         input = EditText(this).apply {
-            hint = "Название или категория, например DNS"
+            hint = "Название или категория магазина"
             setTextColor(0xFFFFFFFF.toInt())
             setHintTextColor(0xFF999999.toInt())
             setSingleLine(true)
         }
         content.addView(input)
+        suggestions = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, dp(4))
+        }
+        content.addView(suggestions)
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                scheduleSuggestions(s?.toString().orEmpty())
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
 
         val buttons = LinearLayout(this)
         buttons.addView(Button(this).apply {
@@ -86,47 +112,102 @@ class MainActivity : Activity() {
         }
         content.addView(info)
 
-        map = WebView(this)
-        content.addView(map, LinearLayout.LayoutParams(-1, dp(230)))
+        mapPage = MapPage(this, savedInstanceState)
+        content.addView(mapPage.view)
         content.addView(TextView(this).apply {
-            text = "Результаты"
+            text = "Результаты поиска"
             textSize = 18f
             setTextColor(0xFFFFFFFF.toInt())
+            setPadding(0, dp(10), 0, dp(4))
         })
         results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(results)
+
+        routeButton = Button(this).apply {
+            text = "Построить пеший маршрут"
+            isEnabled = false
+            setOnClickListener { openWalkingRoute() }
+        }
+        content.addView(routeButton)
+
+        content.addView(TextView(this).apply {
+            text = "Карта: © OpenStreetMap contributors"
+            textSize = 11f
+            setTextColor(0xFFAAAAAA.toInt())
+            setPadding(0, dp(5), 0, 0)
+        })
 
         scroll.addView(content)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
     }
 
-    private fun searchStores() {
+    private fun scheduleSuggestions(text: String) {
+        suggestionTask?.let(handler::removeCallbacks)
+        suggestions.removeAllViews()
+        val query = text.trim()
+        if (query.length < 2) return
+        val task = object : Runnable {
+            override fun run() {
+                val location = currentLocation ?: return
+                val wait = (1200L - (System.currentTimeMillis() - lastSuggestionRequest)).coerceAtLeast(0L)
+                if (wait > 0L) {
+                    handler.postDelayed(this, wait)
+                    return
+                }
+                lastSuggestionRequest = System.currentTimeMillis()
+                executor.execute {
+                    try {
+                        val found = StoreRepository.suggest(location.latitude, location.longitude, query)
+                        runOnUiThread {
+                            if (input.text.toString().trim() != query) return@runOnUiThread
+                            suggestions.removeAllViews()
+                            found.take(6).forEach { store ->
+                                val button = Button(this@MainActivity).apply {
+                                    text = "${store.name}\n${store.address}"
+                                    textSize = 12f
+                                    setOnClickListener {
+                                        input.setText(store.name)
+                                        input.setSelection(input.text.length)
+                                        suggestions.removeAllViews()
+                                        searchStores(store.name)
+                                    }
+                                }
+                                suggestions.addView(button)
+                            }
+                        }
+                    } catch (_: Exception) {
+                        // Подсказки необязательны: основной поиск остаётся доступен кнопкой «Найти».
+                    }
+                }
+            }
+        }
+        suggestionTask = task
+        handler.postDelayed(task, 1200L)
+    }
+
+    private fun searchStores(forcedQuery: String? = null) {
         val location = currentLocation
         if (location == null) {
-            info.text = "Координаты ещё не получены — нажми «Моё место»."
+            info.text = "Сначала получи актуальное местоположение — нажми «Моё место»."
             locate()
             return
         }
-        val query = input.text.toString().trim()
+        val query = (forcedQuery ?: input.text.toString()).trim()
         if (query.isEmpty()) {
             info.text = "Введи название или категорию."
             return
         }
-
-        info.text = "Ищем через серверы OpenStreetMap…"
+        suggestions.removeAllViews()
+        info.text = "Ищем магазины…"
         results.removeAllViews()
         executor.execute {
             try {
                 val found = StoreRepository.search(location.latitude, location.longitude, query, this)
                 runOnUiThread {
-                    info.text = if (found.isEmpty()) {
-                        "Ничего не найдено рядом. Попробуй другое название."
-                    } else {
-                        "Найдено: ${found.size}. Выбери магазин."
-                    }
+                    info.text = if (found.isEmpty()) "Ничего не найдено. Попробуй другое название." else "Найдено: ${found.size}. Нажми «Выбрать этот магазин»."
                     found.forEach { addStoreCard(it) }
-                    MapPage.show(map, location.latitude, location.longitude, found)
+                    mapPage.show(location.latitude, location.longitude, found)
                 }
             } catch (e: Exception) {
                 runOnUiThread { info.text = e.message ?: "Поиск временно недоступен. Повтори позже." }
@@ -150,7 +231,7 @@ class MainActivity : Activity() {
             setTextColor(0xFFD6B45A.toInt())
         })
         card.addView(Button(this).apply {
-            text = "Выбрать для виджета"
+            text = "Выбрать этот магазин"
             setOnClickListener { chooseStore(store) }
         })
         val params = LinearLayout.LayoutParams(-1, -2)
@@ -164,29 +245,41 @@ class MainActivity : Activity() {
             locate()
             return
         }
-        info.text = "Обновляем виджет…"
+        selectedStore = store
+        routeButton.isEnabled = true
+        info.text = "Сохраняем выбранный магазин…"
         executor.execute {
             val imageFile = File(cacheDir, "widget-map.png")
             imageFile.delete()
             val bitmap = MapTile.make(location.latitude, location.longitude, store.lat, store.lon)
-            if (bitmap != null) {
-                imageFile.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, it) }
+            val mapSaved = if (bitmap != null) {
+                val saved = try {
+                    imageFile.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, it) }
+                } catch (_: Exception) { false }
                 bitmap.recycle()
-            }
+                saved && imageFile.exists()
+            } else false
             val distance = StoreRepository.distance(location.latitude, location.longitude, store.lat, store.lon)
             getSharedPreferences("chosen", MODE_PRIVATE).edit()
                 .putString("name", store.name)
                 .putString("address", store.address)
                 .putString("distance", formatDistance(distance))
-                .putString("map", if (bitmap != null && imageFile.exists()) imageFile.absolutePath else null)
+                .putString("map", if (mapSaved) imageFile.absolutePath else null)
+                .putString("lat", store.lat.toString())
+                .putString("lon", store.lon.toString())
                 .apply()
             runOnUiThread {
                 StoreWidget.update(this)
-                info.text = "Виджет обновлён: ${store.name}"
-                val route = "https://www.openstreetmap.org/directions?engine=fossgis_osrm_foot&route=${location.latitude}%2C${location.longitude}%3B${store.lat}%2C${store.lon}"
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(route)))
+                info.text = "Выбран магазин: ${store.name}. Виджет обновлён."
             }
         }
+    }
+
+    private fun openWalkingRoute() {
+        val location = currentLocation ?: return
+        val store = selectedStore ?: return
+        val route = "https://www.openstreetmap.org/directions?engine=fossgis_osrm_foot&route=${location.latitude}%2C${location.longitude}%3B${store.lat}%2C${store.lon}"
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(route)))
     }
 
     private fun showAddDialog() {
@@ -198,7 +291,6 @@ class MainActivity : Activity() {
         val addressInput = EditText(this).apply { hint = "Полный адрес: улица, дом, город" }
         fields.addView(nameInput)
         fields.addView(addressInput)
-
         AlertDialog.Builder(this)
             .setTitle("Добавить магазин")
             .setView(fields)
@@ -222,8 +314,8 @@ class MainActivity : Activity() {
                         val store = Store(name, address, point.first, point.second, distance)
                         runOnUiThread {
                             addStoreCard(store)
-                            info.text = "Магазин сохранён на этом телефоне. Его можно найти по названию."
-                            if (location != null) MapPage.show(map, location.latitude, location.longitude, listOf(store))
+                            info.text = "Магазин сохранён на этом телефоне."
+                            if (location != null) mapPage.show(location.latitude, location.longitude, listOf(store))
                         }
                     } catch (e: Exception) {
                         runOnUiThread { info.text = e.message ?: "Не удалось найти адрес." }
@@ -238,22 +330,22 @@ class MainActivity : Activity() {
             requestLocationPermission()
             return
         }
-        info.text = "Получаем координаты…"
+        info.text = "Получаем новое местоположение…"
         try {
             locationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
                 .addOnSuccessListener { location ->
-                    if (location != null) {
-                        setCurrentLocation(location)
+                    if (location == null) {
+                        info.text = "Не удалось получить новое местоположение. Включи геолокацию и попробуй ещё раз."
                     } else {
-                        locationClient.lastLocation
-                            .addOnSuccessListener { previous ->
-                                if (previous != null) setCurrentLocation(previous)
-                                else info.text = "Телефон не вернул координаты. Проверь геолокацию и попробуй ещё раз."
-                            }
-                            .addOnFailureListener { info.text = "Не удалось получить последнее местоположение." }
+                        val age = System.currentTimeMillis() - location.time
+                        if (age > 120_000L || age < -30_000L) {
+                            info.text = "Получены устаревшие координаты. Подожди немного и нажми «Моё место» ещё раз."
+                        } else {
+                            setCurrentLocation(location)
+                        }
                     }
                 }
-                .addOnFailureListener { info.text = "Служба геолокации не ответила. Проверь разрешения." }
+                .addOnFailureListener { info.text = "Служба геолокации не ответила. Проверь разрешения и GPS." }
         } catch (_: SecurityException) {
             info.text = "Нет разрешения на геолокацию."
         }
@@ -261,14 +353,15 @@ class MainActivity : Activity() {
 
     private fun setCurrentLocation(location: Location) {
         currentLocation = location
-        info.text = "Координаты получены. Введи магазин или категорию."
-        MapPage.show(map, location.latitude, location.longitude, emptyList())
+        selectedStore = null
+        routeButton.isEnabled = false
+        info.text = "Местоположение обновлено. Введи название магазина."
+        mapPage.show(location.latitude, location.longitude, emptyList())
     }
 
-    private fun hasLocationPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+    private fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-    }
 
     private fun requestLocationPermission() {
         ActivityCompat.requestPermissions(
@@ -295,9 +388,17 @@ class MainActivity : Activity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
+    override fun onStart() { super.onStart(); mapPage.onStart() }
+    override fun onResume() { super.onResume(); mapPage.onResume() }
+    override fun onPause() { mapPage.onPause(); super.onPause() }
+    override fun onStop() { mapPage.onStop(); super.onStop() }
+    override fun onLowMemory() { super.onLowMemory(); mapPage.onLowMemory() }
+    override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); mapPage.onSaveInstanceState(outState) }
+
     override fun onDestroy() {
-        super.onDestroy()
+        suggestionTask?.let(handler::removeCallbacks)
         executor.shutdown()
-        map.destroy()
+        mapPage.onDestroy()
+        super.onDestroy()
     }
 }

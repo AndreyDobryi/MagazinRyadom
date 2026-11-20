@@ -32,7 +32,7 @@ object MapTile {
             val tileY = floor(userY / 256.0).toInt()
             val connection = URL("https://tile.openstreetmap.org/$zoom/$tileX/$tileY.png")
                 .openConnection() as HttpsURLConnection
-            connection.setRequestProperty("User-Agent", "MagazinRyadom/1.2 Android")
+            connection.setRequestProperty("User-Agent", "MagazinRyadom/1.4 (Android app)")
             connection.connectTimeout = 8000
             connection.readTimeout = 10000
             val tile = connection.inputStream.use { BitmapFactory.decodeStream(it) }
