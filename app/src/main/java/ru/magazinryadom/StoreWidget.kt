@@ -1,41 +1,5 @@
 package ru.magazinryadom
-
-import android.app.PendingIntent
-import android.appwidget.AppWidgetManager
-import android.appwidget.AppWidgetProvider
-import android.content.ComponentName
-import android.content.Context
-import android.content.Intent
-import android.widget.RemoteViews
-
-class StoreWidget : AppWidgetProvider() {
-    override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
-        ids.forEach { updateOne(context, manager, it) }
-    }
-
-    companion object {
-        fun update(context: Context) {
-            val manager = AppWidgetManager.getInstance(context)
-            val ids = manager.getAppWidgetIds(ComponentName(context, StoreWidget::class.java))
-            ids.forEach { updateOne(context, manager, it) }
-        }
-
-        private fun updateOne(context: Context, manager: AppWidgetManager, id: Int) {
-            val prefs = context.getSharedPreferences("store", Context.MODE_PRIVATE)
-            val name = prefs.getString("name", "Выбери магазин") ?: "Выбери магазин"
-            val distance = prefs.getString("distance", "Открой приложение") ?: "Открой приложение"
-            val address = prefs.getString("address", "") ?: ""
-            val views = RemoteViews(context.packageName, R.layout.store_widget)
-            views.setTextViewText(R.id.widget_store, name)
-            val detail = if (address.isBlank()) distance else "$distance • $address"
-            views.setTextViewText(R.id.widget_distance, detail)
-            val intent = PendingIntent.getActivity(
-                context, 0, Intent(context, MainActivity::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            views.setOnClickPendingIntent(R.id.widget_action, intent)
-            views.setOnClickPendingIntent(R.id.widget_store, intent)
-            manager.updateAppWidget(id, views)
-        }
-    }
-}
+import android.app.*
+import android.appwidget.*
+import android.content.*
+class StoreWidget:AppWidgetProvider(){override fun onUpdate(c:Context,m:AppWidgetManager,ids:IntArray)=update(c);companion object{fun update(c:Context){val m=AppWidgetManager.getInstance(c);val ids=m.getAppWidgetIds(ComponentName(c,StoreWidget::class.java));val p=c.getSharedPreferences("chosen",0);ids.forEach{id->val v=RemoteViews(c.packageName,R.layout.store_widget);v.setTextViewText(R.id.widget_name,p.getString("name","Выбери магазин"));v.setTextViewText(R.id.widget_address,p.getString("address","Адрес появится после выбора"));v.setTextViewText(R.id.widget_distance,p.getString("distance","Расстояние"));p.getString("map",null)?.let{path->BitmapFactory.decodeFile(path)?.let{v.setImageViewBitmap(R.id.widget_map,it)}};val pi=PendingIntent.getActivity(c,0,Intent(c,MainActivity::class.java),PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE);v.setOnClickPendingIntent(R.id.widget_root,pi);m.updateAppWidget(id,v)}}}}

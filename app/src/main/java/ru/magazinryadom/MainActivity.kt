@@ -1,163 +1,29 @@
 package ru.magazinryadom
-
 import android.Manifest
-import android.app.Activity
-import android.content.Context
-import android.content.Intent
+import android.app.*
+import android.content.*
 import android.content.pm.PackageManager
 import android.location.Location
 import android.net.Uri
 import android.os.Bundle
-import android.view.ViewGroup
+import android.webkit.WebView
 import android.widget.*
 import androidx.core.app.ActivityCompat
-import com.google.android.gms.location.LocationServices
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
-import kotlin.concurrent.thread
-
-class MainActivity : Activity() {
-    // Список обычных продуктовых сетей. Поиск ограничен продуктовыми магазинами.
-    private val stores = listOf("Пятёрочка", "Магнит", "Перекрёсток", "Лента", "Дикси", "Лидл", "Aldi", "REWE", "EDEKA")
-    private lateinit var selected: Spinner
-    private lateinit var status: TextView
-    private lateinit var distance: TextView
-    private lateinit var mapButton: Button
-    private var nearestLat = 0.0
-    private var nearestLon = 0.0
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        val prefs = getSharedPreferences("store", Context.MODE_PRIVATE)
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(28, 36, 28, 24)
-            setBackgroundColor(0xFF101010.toInt())
-        }
-        fun label(value: String, size: Float, color: Int = 0xFFFFFFFF.toInt()) = TextView(this).apply {
-            text = value; textSize = size; setTextColor(color); setPadding(0, 12, 0, 12)
-        }
-        fun add(view: android.view.View) {
-            layout.addView(view, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        }
-
-        add(label("Магазин рядом", 28f))
-        add(label("Выбери продуктовую сеть. Приложение найдёт ближайшую отмеченную точку.", 15f, 0xFFAAAAAA.toInt()))
-        selected = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, stores)
-            setSelection(stores.indexOf(prefs.getString("name", stores[0])).coerceAtLeast(0))
-        }
-        add(selected)
-        val findButton = Button(this).apply { text = "Найти ближайший магазин" }
-        add(findButton)
-        distance = label(prefs.getString("distance", "Расстояние пока не рассчитано") ?: "Расстояние пока не рассчитано", 25f)
-        add(distance)
-        status = label("Поиск использует данные OpenStreetMap. Точность зависит от заполненности карты.", 14f, 0xFFAAAAAA.toInt())
-        add(status)
-        mapButton = Button(this).apply { text = "Открыть маршрут"; isEnabled = false }
-        add(mapButton)
-
-        findButton.setOnClickListener {
-            val name = selected.selectedItem.toString()
-            prefs.edit().putString("name", name).apply()
-            requestOrSearch(name)
-        }
-        mapButton.setOnClickListener {
-            if (nearestLat != 0.0 && nearestLon != 0.0) {
-                val uri = Uri.parse("geo:$nearestLat,$nearestLon?q=$nearestLat,$nearestLon(${Uri.encode("Ближайший магазин")})")
-                startActivity(Intent(Intent.ACTION_VIEW, uri))
-            }
-        }
-        setContentView(ScrollView(this).apply { addView(layout) })
-
-        // Восстановить последнюю найденную точку для кнопки маршрута.
-        nearestLat = prefs.getString("lat", "0")?.toDoubleOrNull() ?: 0.0
-        nearestLon = prefs.getString("lon", "0")?.toDoubleOrNull() ?: 0.0
-        mapButton.isEnabled = nearestLat != 0.0 && nearestLon != 0.0
-    }
-
-    private fun requestOrSearch(name: String) {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this,
-                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), 10)
-        } else findNearest(name)
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 10 && grantResults.any { it == PackageManager.PERMISSION_GRANTED }) {
-            val name = getSharedPreferences("store", MODE_PRIVATE).getString("name", stores[0]) ?: stores[0]
-            findNearest(name)
-        } else status.text = "Разреши доступ к местоположению, чтобы найти магазин рядом."
-    }
-
-    private fun findNearest(name: String) {
-        status.text = "Определяю местоположение…"
-        mapButton.isEnabled = false
-        val client = LocationServices.getFusedLocationProviderClient(this)
-        try {
-            client.getCurrentLocation(com.google.android.gms.location.Priority.PRIORITY_BALANCED_POWER_ACCURACY, null)
-                .addOnSuccessListener { current ->
-                    if (current != null) searchOpenStreetMap(name, current) else client.lastLocation.addOnSuccessListener { last ->
-                        if (last == null) status.text = "Не удалось получить координаты. Включи геолокацию и попробуй ещё раз."
-                        else searchOpenStreetMap(name, last)
-                    }
-                }
-                .addOnFailureListener { status.text = "Не удалось получить местоположение: ${it.localizedMessage}" }
-        } catch (e: SecurityException) {
-            status.text = "Нет разрешения на геолокацию. Разреши доступ в настройках Android."
-        }
-    }
-
-    private fun searchOpenStreetMap(name: String, location: Location) {
-        status.text = "Ищу точки поблизости…"
-        thread {
-            try {
-                val query = """[out:json][timeout:25];(node[shop](around:7000,${location.latitude},${location.longitude});way[shop](around:7000,${location.latitude},${location.longitude}););out center tags;"""
-                val url = URL("https://overpass-api.de/api/interpreter?data=" + java.net.URLEncoder.encode(query, "UTF-8"))
-                val conn = (url.openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 15000; readTimeout = 30000; requestMethod = "GET"
-                    setRequestProperty("User-Agent", "MagazinRyadomAndroid/1.0")
-                }
-                val data = JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).getJSONArray("elements")
-                var bestDistance = Float.MAX_VALUE
-                var bestLat = 0.0; var bestLon = 0.0; var bestName = ""
-                for (i in 0 until data.length()) {
-                    val item = data.getJSONObject(i)
-                    val tags = item.optJSONObject("tags") ?: continue
-                    val shopName = tags.optString("name", "")
-                    val brand = tags.optString("brand", "")
-                    val operator = tags.optString("operator", "")
-                    val haystack = "$shopName $brand $operator".lowercase()
-                    if (!haystack.contains(name.lowercase())) continue
-                    val lat = if (item.has("lat")) item.getDouble("lat") else item.optJSONObject("center")?.optDouble("lat") ?: continue
-                    val lon = if (item.has("lon")) item.getDouble("lon") else item.optJSONObject("center")?.optDouble("lon") ?: continue
-                    val result = FloatArray(1)
-                    Location.distanceBetween(location.latitude, location.longitude, lat, lon, result)
-                    if (result[0] < bestDistance) { bestDistance = result[0]; bestLat = lat; bestLon = lon; bestName = shopName.ifBlank { brand.ifBlank { name } } }
-                }
-                runOnUiThread {
-                    if (bestDistance == Float.MAX_VALUE) {
-                        status.text = "«$name» не найдена в OpenStreetMap в радиусе 7 км. Попробуй позже или проверь карту."
-                        distance.text = "Нет результатов"
-                    } else {
-                        nearestLat = bestLat; nearestLon = bestLon
-                        val shownDistance = if (bestDistance < 1000) "${bestDistance.toInt()} м" else String.format("%.1f км", bestDistance / 1000f)
-                        distance.text = shownDistance
-                        status.text = "$bestName • ближайшая отмеченная точка"
-                        mapButton.isEnabled = true
-                        getSharedPreferences("store", MODE_PRIVATE).edit()
-                            .putString("distance", shownDistance).putString("address", bestName)
-                            .putString("lat", "$bestLat").putString("lon", "$bestLon").apply()
-                        StoreWidget.update(this)
-                    }
-                }
-                conn.disconnect()
-            } catch (e: Exception) {
-                runOnUiThread { status.text = "Ошибка поиска. Проверь интернет и попробуй ещё раз." }
-            }
-        }
-    }
+import com.google.android.gms.location.*
+import java.io.File
+import java.util.Locale
+import java.util.concurrent.Executors
+import kotlin.math.roundToInt
+class MainActivity:Activity(){private val ex=Executors.newSingleThreadExecutor();private val client by lazy{LocationServices.getFusedLocationProviderClient(this)};private lateinit var input:EditText;private lateinit var info:TextView;private lateinit var list:LinearLayout;private lateinit var map:WebView;private var loc:Location?=null;private val req=22
+ override fun onCreate(b:Bundle?){super.onCreate(b);ui();if(permission())locate()else ActivityCompat.requestPermissions(this,arrayOf(Manifest.permission.ACCESS_FINE_LOCATION,Manifest.permission.ACCESS_COARSE_LOCATION),req)}
+ private fun ui(){val root=LinearLayout(this).apply{orientation=1;setPadding(dp(16),dp(14),dp(16),dp(12));setBackgroundColor(0xFF101114.toInt())};val sc=ScrollView(this);val c=LinearLayout(this).apply{orientation=1};c.addView(TextView(this).apply{text="Магазин рядом";textSize=26f;setTextColor(-1);setTypeface(null,1)});input=EditText(this).apply{hint="Название или категория, например DNS";setTextColor(-1);setHintTextColor(0xFF999999.toInt());setSingleLine(true)};c.addView(input);val row=LinearLayout(this);row.addView(Button(this).apply{text="Найти";setOnClickListener{search()}},LinearLayout.LayoutParams(0,dp(48),1f));row.addView(Button(this).apply{text="Моё место";setOnClickListener{locate()}},LinearLayout.LayoutParams(0,dp(48),1f));c.addView(row);c.addView(Button(this).apply{text="＋ Добавить магазин вручную";setOnClickListener{addDialog()}});info=TextView(this).apply{text="Определяем координаты…";setTextColor(0xFFD6B45A.toInt());setPadding(0,dp(8),0,dp(8))};c.addView(info);map=WebView(this);c.addView(map,LinearLayout.LayoutParams(-1,dp(230)));c.addView(TextView(this).apply{text="Результаты";textSize=18f;setTextColor(-1)});list=LinearLayout(this).apply{orientation=1};c.addView(list);sc.addView(c);root.addView(sc,LinearLayout.LayoutParams(-1,0,1f));setContentView(root)}
+ private fun search(){val l=loc;if(l==null){info.text="Координаты ещё не получены — нажми «Моё место».";locate();return};val q=input.text.toString().trim();if(q.isEmpty()){info.text="Введи название или категорию.";return};info.text="Ищем через серверы OpenStreetMap…";list.removeAllViews();ex.execute{try{val found=StoreRepository.search(l.latitude,l.longitude,q,this);runOnUiThread{info.text=if(found.isEmpty())"Ничего не найдено рядом. Попробуй другое название." else "Найдено: ${found.size}. Выбери магазин.";found.forEach{addCard(it)};MapPage.show(map,l.latitude,l.longitude,found)}}catch(e:Exception){runOnUiThread{info.text=e.message?:"Поиск временно недоступен. Повтори позже."}}}}
+ private fun addCard(s:Store){val box=LinearLayout(this).apply{orientation=1;setPadding(dp(10),dp(8),dp(10),dp(8));setBackgroundColor(0xFF25282E.toInt())};box.addView(TextView(this).apply{text=s.name;setTextColor(-1);textSize=16f});box.addView(TextView(this).apply{text=s.address+" · "+dist(s.distance);setTextColor(0xFFD6B45A.toInt())});box.addView(Button(this).apply{text="Выбрать для виджета";setOnClickListener{choose(s)}});val p=LinearLayout.LayoutParams(-1,-2);p.bottomMargin=dp(8);list.addView(box,p)}
+ private fun choose(s:Store){val l=loc?:return;info.text="Обновляем виджет…";ex.execute{val f=File(cacheDir,"widget-map.png");val bmp=MapTile.make(l.latitude,l.longitude,s.lat,s.lon);if(bmp!=null){f.outputStream().use{bmp.compress(android.graphics.Bitmap.CompressFormat.PNG,90,it)};bmp.recycle()};getSharedPreferences("chosen",0).edit().putString("name",s.name).putString("address",s.address).putString("distance",dist(StoreRepository.distance(l.latitude,l.longitude,s.lat,s.lon))).putString("map",if(f.exists())f.absolutePath else null).apply();runOnUiThread{StoreWidget.update(this);info.text="Виджет обновлён: ${s.name}";startActivity(Intent(Intent.ACTION_VIEW,Uri.parse("https://www.openstreetmap.org/directions?engine=fossgis_osrm_foot&route=${l.latitude}%2C${l.longitude}%3B${s.lat}%2C${s.lon}")))}}
+ private fun addDialog(){val box=LinearLayout(this).apply{orientation=1;setPadding(dp(16),0,dp(16),0)};val n=EditText(this).apply{hint="Название магазина"};val a=EditText(this).apply{hint="Полный адрес: улица, дом, город"};box.addView(n);box.addView(a);AlertDialog.Builder(this).setTitle("Добавить магазин").setView(box).setNegativeButton("Отмена",null).setPositiveButton("Сохранить"){_,_->val name=n.text.toString().trim();val addr=a.text.toString().trim();if(name.isEmpty()||addr.isEmpty()){info.text="Заполни название и адрес.";return@setPositiveButton};info.text="Ищем координаты адреса…";ex.execute{try{val pt=StoreRepository.geocode(addr);StoreRepository.save(this,name,addr,pt.first,pt.second);val l=loc;val d=if(l==null)0.0 else StoreRepository.distance(l.latitude,l.longitude,pt.first,pt.second);val s=Store(name,addr,pt.first,pt.second,d);runOnUiThread{addCard(s);info.text="Магазин сохранён на этом телефоне. Его можно найти по названию.";if(l!=null)MapPage.show(map,l.latitude,l.longitude,listOf(s))}}catch(e:Exception){runOnUiThread{info.text=e.message?:"Не удалось найти адрес."}}}}.show()}
+ private fun locate(){if(!permission()){ActivityCompat.requestPermissions(this,arrayOf(Manifest.permission.ACCESS_FINE_LOCATION,Manifest.permission.ACCESS_COARSE_LOCATION),req);return};info.text="Получаем координаты…";try{client.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY,null).addOnSuccessListener{v->if(v!=null)setLoc(v)else client.lastLocation.addOnSuccessListener{old->if(old!=null)setLoc(old)else info.text="Телефон не вернул координаты. Проверь геолокацию и попробуй ещё раз."}.addOnFailureListener{info.text="Не удалось получить последнее местоположение."}}.addOnFailureListener{info.text="Служба геолокации не ответила. Проверь разрешения."}}catch(e:SecurityException){info.text="Нет разрешения на геолокацию."}}
+ private fun setLoc(v:Location){loc=v;info.text="Координаты получены. Введи магазин или категорию.";MapPage.show(map,v.latitude,v.longitude,emptyList())}
+ private fun permission()=ActivityCompat.checkSelfPermission(this,Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED||ActivityCompat.checkSelfPermission(this,Manifest.permission.ACCESS_COARSE_LOCATION)==PackageManager.PERMISSION_GRANTED
+ override fun onRequestPermissionsResult(r:Int,p:Array<out String>,g:IntArray){super.onRequestPermissionsResult(r,p,g);if(r==req){if(g.any{it==PackageManager.PERMISSION_GRANTED})locate()else info.text="Разреши доступ к местоположению в настройках."}}
+ private fun dist(m:Double)=if(m<1000)"${m.roundToInt()} м" else String.format(Locale.getDefault(),"%.1f км",m/1000);private fun dp(v:Int)=(v*resources.displayMetrics.density).roundToInt()
 }
