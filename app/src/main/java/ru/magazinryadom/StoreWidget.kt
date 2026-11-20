@@ -1,5 +1,49 @@
 package ru.magazinryadom
-import android.app.*
-import android.appwidget.*
-import android.content.*
-class StoreWidget:AppWidgetProvider(){override fun onUpdate(c:Context,m:AppWidgetManager,ids:IntArray)=update(c);companion object{fun update(c:Context){val m=AppWidgetManager.getInstance(c);val ids=m.getAppWidgetIds(ComponentName(c,StoreWidget::class.java));val p=c.getSharedPreferences("chosen",0);ids.forEach{id->val v=RemoteViews(c.packageName,R.layout.store_widget);v.setTextViewText(R.id.widget_name,p.getString("name","Выбери магазин"));v.setTextViewText(R.id.widget_address,p.getString("address","Адрес появится после выбора"));v.setTextViewText(R.id.widget_distance,p.getString("distance","Расстояние"));p.getString("map",null)?.let{path->BitmapFactory.decodeFile(path)?.let{v.setImageViewBitmap(R.id.widget_map,it)}};val pi=PendingIntent.getActivity(c,0,Intent(c,MainActivity::class.java),PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE);v.setOnClickPendingIntent(R.id.widget_root,pi);m.updateAppWidget(id,v)}}}}
+
+import android.app.PendingIntent
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProvider
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.graphics.BitmapFactory
+import android.widget.RemoteViews
+
+class StoreWidget : AppWidgetProvider() {
+    override fun onUpdate(context: Context, manager: AppWidgetManager, appWidgetIds: IntArray) {
+        update(context)
+    }
+
+    companion object {
+        fun update(context: Context) {
+            val manager = AppWidgetManager.getInstance(context)
+            val ids = manager.getAppWidgetIds(ComponentName(context, StoreWidget::class.java))
+            val preferences = context.getSharedPreferences("chosen", Context.MODE_PRIVATE)
+
+            ids.forEach { id ->
+                val views = RemoteViews(context.packageName, R.layout.store_widget)
+                views.setTextViewText(R.id.widget_name, preferences.getString("name", "Выбери магазин"))
+                views.setTextViewText(R.id.widget_address, preferences.getString("address", "Адрес появится после выбора"))
+                views.setTextViewText(R.id.widget_distance, preferences.getString("distance", "Расстояние"))
+
+                val mapPath = preferences.getString("map", null)
+                val mapBitmap = mapPath?.let { BitmapFactory.decodeFile(it) }
+                if (mapBitmap != null) {
+                    views.setImageViewBitmap(R.id.widget_map, mapBitmap)
+                } else {
+                    views.setImageViewResource(R.id.widget_map, android.R.color.darker_gray)
+                }
+
+                val openApp = Intent(context, MainActivity::class.java)
+                val pendingIntent = PendingIntent.getActivity(
+                    context,
+                    0,
+                    openApp,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                views.setOnClickPendingIntent(R.id.widget_root, pendingIntent)
+                manager.updateAppWidget(id, views)
+            }
+        }
+    }
+}

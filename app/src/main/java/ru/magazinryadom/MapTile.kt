@@ -1,6 +1,75 @@
 package ru.magazinryadom
-import android.graphics.*
+
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
 import java.net.URL
 import javax.net.ssl.HttpsURLConnection
-import kotlin.math.*
-object MapTile { fun make(la:Double,lo:Double,sla:Double,slo:Double):Bitmap?=try{val z=15;val n=1 shl z;fun x(v:Double)=(v+180)/360*256*n;fun y(v:Double):Double{val r=Math.toRadians(v.coerceIn(-85.0,85.0));return(1-ln(tan(r)+1/cos(r))/Math.PI)/2*256*n};val ux=x(lo);val uy=y(la);val tx=floor(ux/256).toInt();val ty=floor(uy/256).toInt();val c=URL("https://tile.openstreetmap.org/$z/$tx/$ty.png").openConnection() as HttpsURLConnection;c.setRequestProperty("User-Agent","MagazinRyadom/1.2 Android");c.connectTimeout=8000;c.readTimeout=10000;val tile=c.inputStream.use{BitmapFactory.decodeStream(it)};c.disconnect();val b=Bitmap.createBitmap(512,220,Bitmap.Config.ARGB_8888);val cv=Canvas(b);val p=Paint(3);cv.drawColor(Color.LTGRAY);if(tile!=null)cv.drawBitmap(tile,null,Rect(0,0,512,220),p);p.color=Color.BLUE;cv.drawCircle(256f,110f,9f,p);p.color=Color.RED;cv.drawCircle(256+(x(slo)-ux).toFloat(),110+(y(sla)-uy).toFloat(),8f,p);tile?.recycle();b}catch(e:Exception){null} }
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.floor
+import kotlin.math.ln
+import kotlin.math.tan
+
+object MapTile {
+    fun make(userLat: Double, userLon: Double, storeLat: Double, storeLon: Double): Bitmap? {
+        return try {
+            val zoom = 15
+            val tileCount = 1 shl zoom
+            fun worldX(lon: Double): Double = (lon + 180.0) / 360.0 * 256.0 * tileCount
+            fun worldY(lat: Double): Double {
+                val radians = Math.toRadians(lat.coerceIn(-85.0, 85.0))
+                val mercator = ln(tan(radians) + 1.0 / cos(radians))
+                return (1.0 - mercator / PI) / 2.0 * 256.0 * tileCount
+            }
+
+            val userX = worldX(userLon)
+            val userY = worldY(userLat)
+            val tileX = floor(userX / 256.0).toInt()
+            val tileY = floor(userY / 256.0).toInt()
+            val connection = URL("https://tile.openstreetmap.org/$zoom/$tileX/$tileY.png")
+                .openConnection() as HttpsURLConnection
+            connection.setRequestProperty("User-Agent", "MagazinRyadom/1.2 Android")
+            connection.connectTimeout = 8000
+            connection.readTimeout = 10000
+            val tile = connection.inputStream.use { BitmapFactory.decodeStream(it) }
+            connection.disconnect()
+
+            val bitmap = Bitmap.createBitmap(512, 220, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bitmap)
+            canvas.drawColor(Color.rgb(235, 235, 235))
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            if (tile != null) {
+                val left = (256.0 + tileX * 256.0 - userX).toFloat()
+                val top = (110.0 + tileY * 256.0 - userY).toFloat()
+                canvas.drawBitmap(tile, null, Rect(left.toInt(), top.toInt(), (left + 256).toInt(), (top + 256).toInt()), paint)
+            }
+
+            paint.color = Color.rgb(35, 105, 220)
+            canvas.drawCircle(256f, 110f, 9f, paint)
+            paint.color = Color.WHITE
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 3f
+            canvas.drawCircle(256f, 110f, 9f, paint)
+            paint.style = Paint.Style.FILL
+
+            val storeX = (256.0 + worldX(storeLon) - userX).toFloat()
+            val storeY = (110.0 + worldY(storeLat) - userY).toFloat()
+            if (storeX in 0f..512f && storeY in 0f..220f) {
+                paint.color = Color.rgb(205, 55, 55)
+                canvas.drawCircle(storeX, storeY, 8f, paint)
+                paint.color = Color.WHITE
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 2f
+                canvas.drawCircle(storeX, storeY, 8f, paint)
+            }
+            tile?.recycle()
+            bitmap
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
