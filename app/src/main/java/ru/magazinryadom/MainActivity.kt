@@ -164,7 +164,7 @@ class MainActivity : Activity() {
                             suggestions.removeAllViews()
                             found.take(6).forEach { store ->
                                 val button = Button(this@MainActivity).apply {
-                                    text = "${store.name}\n${store.address}"
+                                    setText("${store.name}\n${store.address}")
                                     textSize = 12f
                                     setOnClickListener {
                                         input.setText(store.name)

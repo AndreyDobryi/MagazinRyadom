@@ -3,8 +3,6 @@ package ru.magazinryadom
 import android.content.Context
 import android.view.ViewGroup
 import org.maplibre.android.MapLibre
-import org.maplibre.android.module.http.HttpRequestUtil
-import okhttp3.OkHttpClient
 import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapView
@@ -22,14 +20,6 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
 
     init {
         MapLibre.getInstance(context.applicationContext)
-        HttpRequestUtil().setOkHttpClient(
-            OkHttpClient.Builder().addInterceptor { chain ->
-                val request = chain.request().newBuilder()
-                    .header("User-Agent", "MagazinRyadom/1.4 (Android app)")
-                    .build()
-                chain.proceed(request)
-            }.build()
-        )
         view = MapView(context)
         view.layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
