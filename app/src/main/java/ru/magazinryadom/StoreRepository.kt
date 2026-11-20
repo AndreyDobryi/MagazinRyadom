@@ -16,9 +16,9 @@ import kotlin.math.sqrt
 /** Поиск филиалов по бренду/оператору и данным OpenStreetMap. */
 object StoreRepository {
     private const val PHOTON = "https://photon.komoot.io/api/"
-    private const val USER_AGENT = "MagazinRyadom/1.8.2 (Android; OpenStreetMap client)"
-    private const val SEARCH_RADIUS = 12000.0
-    private const val MAX_RESULTS = 60
+    private const val USER_AGENT = "MagazinRyadom/1.8.4 (Android; OpenStreetMap client)"
+    private const val SEARCH_RADIUS = 6000.0
+    private const val MAX_RESULTS = 50
     // Prefer the VK Maps / Mail.ru public Overpass instance, which explicitly
     // welcomes app usage. Keep other instances as sequential fallbacks only.
     private val overpassEndpoints = listOf(
@@ -73,35 +73,69 @@ object StoreRepository {
     fun search(lat: Double, lon: Double, term: String, ctx: Context): List<Store> {
         val query = term.trim()
         require(query.isNotEmpty()) { "Выбери сеть магазинов или введи её название." }
+        require(!isRestrictedQuery(query)) { "Этот тип торговой точки недоступен для поиска." }
         require(lat.isFinite() && lon.isFinite() && lat in -90.0..90.0 && lon in -180.0..180.0) {
             "Местоположение не определено. Обнови GPS или задай точку вручную."
         }
 
-        val osm = runCatching { overpassSearch(query, lat, lon, SEARCH_RADIUS.toInt()) }
-        val osmStores = osm.getOrDefault(emptyList())
-        val local = custom(ctx, lat, lon).filter { matchesQuery(it, query) && it.distance <= SEARCH_RADIUS }
-        val photon = mutableListOf<Store>()
-        var photonAvailable = false
-        // Photon is queried only when OSM did not return a branch; this avoids slow duplicate requests.
-        if (osmStores.isEmpty()) {
-            for (alias in aliasesFor(query).take(2)) {
-                val result = runCatching { photonSearch(alias, lat, lon, MAX_RESULTS) }
-                if (result.isSuccess) {
-                    val matched = result.getOrDefault(emptyList()).filter { it.distance <= SEARCH_RADIUS && matchesQuery(it, query) }
-                    if (matched.isNotEmpty()) photonAvailable = true
-                    photon += matched
+        // Логика ранних версий: сначала ищем точки рядом, затем сами считаем
+        // расстояние и выбираем ближайшие. Photon пробуем первым, чтобы поиск
+        // не зависел от доступности публичных Overpass-серверов.
+        val local = custom(ctx, lat, lon)
+            .filter { matchesQuery(it, query) && it.distance <= SEARCH_RADIUS }
+
+        val photonResults = mutableListOf<Store>()
+        val photonErrors = mutableListOf<String>()
+        var photonResponded = false
+        for (alias in aliasesFor(query)) {
+            try {
+                val result = photonSearch(alias, lat, lon, MAX_RESULTS)
+                photonResponded = true
+                photonResults += result.filter {
+                    it.distance <= SEARCH_RADIUS && matchesQuery(it, query)
                 }
+            } catch (e: Exception) {
+                photonErrors += (e.message ?: "Photon: ошибка подключения")
             }
-        }
-        if (osm.isFailure && !photonAvailable && local.isEmpty()) {
-            val reason = osm.exceptionOrNull()?.message ?: "нет ответа от Overpass"
-            throw Exception("Не удалось выполнить поиск магазинов: $reason. Проверь GPS и попробуй позже.", osm.exceptionOrNull())
+            if (photonResults.isNotEmpty()) break
         }
 
-        return (osmStores + photon + local)
-            .distinctBy { "${String.format(Locale.US, "%.5f", it.lat)},${String.format(Locale.US, "%.5f", it.lon)}" }
+        // Если Photon не нашёл ближайшую точку, используем точный локальный
+        // запрос OSM. Ошибка одного источника не отменяет попытку другого.
+        var osmResponded = false
+        var osmError: String? = null
+        val osmResults = if (photonResults.isEmpty()) {
+            try {
+                val found = overpassSearch(query, lat, lon, SEARCH_RADIUS.toInt())
+                osmResponded = true
+                found
+            } catch (e: Exception) {
+                osmError = e.message
+                emptyList()
+            }
+        } else emptyList()
+
+        val combined = (photonResults + osmResults + local)
+            .filter { it.distance.isFinite() && it.distance <= SEARCH_RADIUS }
+            .filterNot { isRestrictedStore(it) }
+            .distinctBy {
+                "${String.format(Locale.US, "%.5f", it.lat)},${String.format(Locale.US, "%.5f", it.lon)}"
+            }
             .sortedBy { it.distance }
             .take(MAX_RESULTS)
+
+        if (combined.isNotEmpty()) return combined
+
+        // Пустая выдача от работающих серверов — это «ничего не найдено»,
+        // а не сетевая ошибка. Ошибку показываем только если оба источника
+        // действительно не ответили и нет сохранённых пользователем точек.
+        if (photonResults.isEmpty() && !osmResponded && local.isEmpty()) {
+            val photonStatus = if (photonResponded) "Photon: сервер ответил, но ближайшие точки не вернул" else null
+            val details = (photonErrors + listOfNotNull(photonStatus, osmError ?: "Overpass: серверы не ответили"))
+                .filter { it.isNotBlank() }.distinct().joinToString("; ")
+            throw Exception("Сервисы поиска временно недоступны. Причины: $details")
+        }
+        return emptyList()
     }
 
     private fun matchesQuery(store: Store, query: String): Boolean {
@@ -111,25 +145,59 @@ object StoreRepository {
     }
 
     fun suggest(term: String): List<Store> {
-        if (term.trim().length < 2) return emptyList()
-        return runCatching { photonSearch(term.trim(), null, null, 6) }.getOrDefault(emptyList())
+        if (term.trim().length < 2 || isRestrictedQuery(term)) return emptyList()
+        return runCatching { photonSearch(term.trim(), null, null, 6) }
+            .getOrDefault(emptyList()).filterNot { isRestrictedStore(it) }
+    }
+
+    private fun isRestrictedQuery(query: String): Boolean {
+        val q = normalize(query).replace(" ", "")
+        return listOf(
+            "красноебелое", "кб", "алкоголь", "алкомаркет", "винныймагазин",
+            "liquorstore", "alcoholshop", "liquor"
+        ).any { q.contains(it) }
+    }
+
+    private fun isRestrictedStore(store: Store): Boolean {
+        val name = normalize(store.name)
+        return listOf("красное и белое", "красное белое", "алкомаркет", "алкогольный магазин")
+            .any { name.contains(normalize(it)) }
     }
 
     private fun photonSearch(query: String, lat: Double?, lon: Double?, limit: Int): List<Store> {
         val encoded = URLEncoder.encode(query, "UTF-8")
-        val url = if (lat != null && lon != null) {
-            "${PHOTON}?q=$encoded&lat=$lat&lon=$lon&limit=${limit.coerceIn(1, MAX_RESULTS)}&lang=ru"
-        } else "${PHOTON}?q=$encoded&limit=${limit.coerceIn(1, MAX_RESULTS)}&lang=ru"
-        val connection = URL(url).openConnection() as HttpURLConnection
-        try {
-            connection.connectTimeout = 8000
-            connection.readTimeout = 12000
-            connection.requestMethod = "GET"
-            connection.setRequestProperty("User-Agent", USER_AGENT)
-            connection.setRequestProperty("Accept", "application/geo+json, application/json")
-            if (connection.responseCode !in 200..299) throw Exception("Photon HTTP ${connection.responseCode}")
-            return parsePhotonResults(connection.inputStream.bufferedReader().use { it.readText() }, lat, lon)
-        } finally { connection.disconnect() }
+        val safeLimit = limit.coerceIn(1, MAX_RESULTS)
+        val urls = linkedSetOf<String>()
+        if (lat != null && lon != null && lat.isFinite() && lon.isFinite()) {
+            // Location bias keeps results close to the user's GPS point.
+            urls += "${PHOTON}?q=$encoded&lat=$lat&lon=$lon&zoom=14&limit=$safeLimit&lang=ru"
+            urls += "${PHOTON}?q=$encoded&lat=$lat&lon=$lon&limit=$safeLimit&lang=ru"
+        }
+        urls += "${PHOTON}?q=$encoded&limit=$safeLimit&lang=ru"
+
+        var lastError: Exception? = null
+        for (url in urls) {
+            val connection = URL(url).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = 6000
+                connection.readTimeout = 10000
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("User-Agent", USER_AGENT)
+                connection.setRequestProperty("Accept", "application/geo+json, application/json")
+                val code = connection.responseCode
+                if (code !in 200..299) {
+                    throw Exception("Photon HTTP $code")
+                }
+                return parsePhotonResults(
+                    connection.inputStream.bufferedReader().use { it.readText() }, lat, lon
+                )
+            } catch (e: Exception) {
+                lastError = e
+            } finally {
+                connection.disconnect()
+            }
+        }
+        throw Exception(lastError?.message ?: "Photon: нет ответа от сервера", lastError)
     }
 
     private fun escapeOverpass(value: String): String = buildString {
@@ -167,8 +235,8 @@ object StoreRepository {
         for (endpoint in overpassEndpoints) {
             val connection = URL(endpoint).openConnection() as HttpURLConnection
             try {
-                connection.connectTimeout = 10000
-                connection.readTimeout = 25000
+                connection.connectTimeout = 6000
+                connection.readTimeout = 12000
                 connection.requestMethod = "POST"
                 connection.doOutput = true
                 connection.setRequestProperty("User-Agent", USER_AGENT)
