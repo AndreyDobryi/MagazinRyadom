@@ -331,7 +331,7 @@ class MainActivity : Activity() {
         val choices = (matches + if (exact == null) listOf(query) else emptyList()).distinct().take(5)
         choices.forEach { network ->
             val button = Button(this).apply {
-                text = "Искать сеть: $network"
+                setText("Искать сеть: $network")
                 isAllCaps = false
                 textSize = 13f
                 setOnClickListener {
