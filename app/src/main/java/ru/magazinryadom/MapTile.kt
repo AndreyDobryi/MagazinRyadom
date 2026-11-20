@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.util.LruCache
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.PI
@@ -17,9 +18,12 @@ import kotlin.math.tan
 
 /** Creates a multi-tile map preview for the launcher widget. */
 object MapTile {
-    private const val ZOOM = 16
     private const val WIDTH = 512
     private const val HEIGHT = 280
+    // Reuse nearby raster tiles instead of repeatedly downloading the same OSM tiles.
+    private val tileCache = object : LruCache<String, Bitmap>(3072) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
+    }
 
     fun make(
         userLat: Double,
@@ -32,15 +36,22 @@ object MapTile {
         return try {
             val centerLat = (userLat + storeLat) / 2.0
             val centerLon = (userLon + storeLon) / 2.0
-            val centerX = worldX(centerLon)
-            val centerY = worldY(centerLat)
+            val straightDistance = distanceMeters(userLat, userLon, storeLat, storeLon)
+            val zoom = when {
+                straightDistance > 8000.0 -> 12
+                straightDistance > 4000.0 -> 14
+                straightDistance > 1800.0 -> 15
+                else -> 16
+            }
+            val centerX = worldX(centerLon, zoom)
+            val centerY = worldY(centerLat, zoom)
             val centerTileX = floor(centerX / 256.0).toInt()
             val centerTileY = floor(centerY / 256.0).toInt()
             val bitmap = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
             canvas.drawColor(Color.rgb(35, 39, 45))
             val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-            val maxTile = 1 shl ZOOM
+            val maxTile = 1 shl zoom
 
             // A 3x3 tile mosaic gives the widget useful context around both points.
             for (dy in -1..1) {
@@ -49,7 +60,7 @@ object MapTile {
                     val ty = centerTileY + dy
                     if (ty !in 0 until maxTile) continue
                     val wrappedX = ((tx % maxTile) + maxTile) % maxTile
-                    val tile = downloadTile(ZOOM, wrappedX, ty) ?: continue
+                    val tile = downloadTile(zoom, wrappedX, ty) ?: continue
                     val left = (WIDTH / 2.0 + tx * 256.0 - centerX).toFloat()
                     val top = (HEIGHT / 2.0 + ty * 256.0 - centerY).toFloat()
                     canvas.drawBitmap(tile, null, RectF(left, top, left + 256f, top + 256f), paint)
@@ -62,8 +73,8 @@ object MapTile {
                 val path = Path()
                 route.forEachIndexed { index, point ->
                     if (!valid(point.first, point.second)) return@forEachIndexed
-                    val x = (WIDTH / 2.0 + worldX(point.second) - centerX).toFloat()
-                    val y = (HEIGHT / 2.0 + worldY(point.first) - centerY).toFloat()
+                    val x = (WIDTH / 2.0 + worldX(point.second, zoom) - centerX).toFloat()
+                    val y = (HEIGHT / 2.0 + worldY(point.first, zoom) - centerY).toFloat()
                     if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
                 }
                 paint.color = Color.WHITE
@@ -78,8 +89,8 @@ object MapTile {
                 paint.style = Paint.Style.FILL
             }
 
-            drawMarker(canvas, paint, screenX(userLon, centerX), screenY(userLat, centerY), Color.rgb(45, 125, 235))
-            drawMarker(canvas, paint, screenX(storeLon, centerX), screenY(storeLat, centerY), Color.rgb(218, 67, 67))
+            drawMarker(canvas, paint, screenX(userLon, centerX, zoom), screenY(userLat, centerY, zoom), Color.rgb(45, 125, 235))
+            drawMarker(canvas, paint, screenX(storeLon, centerX, zoom), screenY(storeLat, centerY, zoom), Color.rgb(218, 165, 32))
             bitmap
         } catch (_: Exception) {
             null
@@ -95,14 +106,24 @@ object MapTile {
     }
 
     private fun downloadTile(z: Int, x: Int, y: Int): Bitmap? {
+        val key = "$z/$x/$y"
+        synchronized(tileCache) {
+            tileCache.get(key)?.let { cached ->
+                return cached.copy(Bitmap.Config.ARGB_8888, false)
+            }
+        }
         val connection = URL("https://tile.openstreetmap.org/$z/$x/$y.png")
             .openConnection() as HttpURLConnection
         return try {
             connection.connectTimeout = 5000
             connection.readTimeout = 7000
-            connection.setRequestProperty("User-Agent", "MagazinRyadom/1.6.0 (Android)")
+            connection.setRequestProperty("User-Agent", "MagazinRyadom/1.8.0 (Android)")
             if (connection.responseCode !in 200..299) null
-            else connection.inputStream.use { BitmapFactory.decodeStream(it) }
+            else {
+                val decoded = connection.inputStream.use { BitmapFactory.decodeStream(it) } ?: return null
+                synchronized(tileCache) { tileCache.put(key, decoded) }
+                decoded.copy(Bitmap.Config.ARGB_8888, false)
+            }
         } finally {
             connection.disconnect()
         }
@@ -111,12 +132,18 @@ object MapTile {
     private fun valid(lat: Double, lon: Double) =
         lat.isFinite() && lon.isFinite() && lat in -85.0..85.0 && lon in -180.0..180.0
 
-    private fun worldX(lon: Double): Double = (lon + 180.0) / 360.0 * 256.0 * (1 shl ZOOM)
-    private fun worldY(lat: Double): Double {
+    private fun worldX(lon: Double, zoom: Int): Double = (lon + 180.0) / 360.0 * 256.0 * (1 shl zoom)
+    private fun worldY(lat: Double, zoom: Int): Double {
         val radians = Math.toRadians(lat.coerceIn(-85.0, 85.0))
         val mercator = ln(tan(radians) + 1.0 / cos(radians))
-        return (1.0 - mercator / PI) / 2.0 * 256.0 * (1 shl ZOOM)
+        return (1.0 - mercator / PI) / 2.0 * 256.0 * (1 shl zoom)
     }
-    private fun screenX(lon: Double, centerX: Double) = (WIDTH / 2.0 + worldX(lon) - centerX).toFloat()
-    private fun screenY(lat: Double, centerY: Double) = (HEIGHT / 2.0 + worldY(lat) - centerY).toFloat()
+    private fun screenX(lon: Double, centerX: Double, zoom: Int) = (WIDTH / 2.0 + worldX(lon, zoom) - centerX).toFloat()
+    private fun screenY(lat: Double, centerY: Double, zoom: Int) = (HEIGHT / 2.0 + worldY(lat, zoom) - centerY).toFloat()
+    private fun distanceMeters(aLat: Double, aLon: Double, bLat: Double, bLon: Double): Double {
+        val dLat = Math.toRadians(bLat - aLat)
+        val dLon = Math.toRadians(bLon - aLon)
+        val x = sin(dLat / 2) * sin(dLat / 2) + cos(Math.toRadians(aLat)) * cos(Math.toRadians(bLat)) * sin(dLon / 2) * sin(dLon / 2)
+        return 6371000.0 * 2.0 * kotlin.math.asin(kotlin.math.sqrt(x.coerceIn(0.0, 1.0)))
+    }
 }

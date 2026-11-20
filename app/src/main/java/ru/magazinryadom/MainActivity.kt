@@ -24,6 +24,7 @@ import com.google.android.gms.location.Priority
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.CurrentLocationRequest
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -41,6 +42,10 @@ class MainActivity : Activity() {
     private lateinit var mapPage: MapPage
     private var currentLocation: Location? = null
     private var selectedStore: Store? = null
+    private var selectedNetwork: String = ""
+    private var networkRefreshRunning = false
+    private var lastNetworkRefreshAt = 0L
+    private var lastNetworkLocation: Location? = null
     private var suggestionTask: Runnable? = null
     private var lastSuggestionRequest = 0L
     private var manualLocationMode = false
@@ -53,17 +58,35 @@ class MainActivity : Activity() {
         override fun onLocationResult(result: LocationResult) {
             val fresh = result.lastLocation ?: return
             if (manualLocationMode) return
+            // Reject obviously old fixes; never move the map back to a cached airport coordinate.
+            val age = System.currentTimeMillis() - fresh.time
+            if (age > 45_000L || age < -15_000L || fresh.accuracy > 150f) return
             currentLocation = fresh
+            getSharedPreferences("chosen", MODE_PRIVATE).edit()
+                .putString("user_lat", fresh.latitude.toString())
+                .putString("user_lon", fresh.longitude.toString())
+                .apply()
             val target = selectedStore
             if (target == null) {
                 mapPage.show(fresh.latitude, fresh.longitude, emptyList())
-                info.text = "GPS обновлён · точность около ${fresh.accuracy.roundToInt()} м"
+                info.text = "Местоположение обновлено · точность ±${fresh.accuracy.roundToInt()} м"
+                val savedNetwork = getSharedPreferences("chosen", MODE_PRIVATE).getString("network", null)
+                if (selectedNetwork.isBlank() && !savedNetwork.isNullOrBlank()) {
+                    input.setText(savedNetwork)
+                    searchStores(savedNetwork)
+                }
                 return
             }
             val previous = lastRouteLocation
             val moved = previous?.distanceTo(fresh) ?: Float.MAX_VALUE
-            if (moved >= 25f && System.currentTimeMillis() - lastRouteRefreshAt >= 20000L) {
+            val now = System.currentTimeMillis()
+            if (moved >= 30f && now - lastRouteRefreshAt >= 25000L) {
                 refreshRouteForMovement(fresh, target)
+            }
+            val networkMoved = lastNetworkLocation?.distanceTo(fresh) ?: Float.MAX_VALUE
+            if (selectedNetwork.isNotBlank() && networkMoved >= 100f && now - lastNetworkRefreshAt >= 120000L) {
+                lastNetworkLocation = Location(fresh)
+                refreshNearestNetwork(fresh, selectedNetwork)
             }
         }
     }
@@ -71,18 +94,10 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi(savedInstanceState)
-        val savedManual = getSharedPreferences("manual_location", MODE_PRIVATE)
-        val savedLat = savedManual.getString("lat", null)?.toDoubleOrNull()
-        val savedLon = savedManual.getString("lon", null)?.toDoubleOrNull()
-        if (savedLat != null && savedLon != null) {
-            val saved = Location("manual").apply {
-                latitude = savedLat
-                longitude = savedLon
-                accuracy = 0f
-                time = System.currentTimeMillis()
-            }
-            setCurrentLocation(saved, manual = true)
-        } else if (hasLocationPermission()) locate() else requestLocationPermission()
+        // Always start with a fresh GPS fix. A previously entered manual address
+        // must never silently replace the phone's real location on next launch.
+        manualLocationMode = false
+        locate()
     }
 
     private fun buildUi(savedInstanceState: Bundle?) {
@@ -105,14 +120,14 @@ class MainActivity : Activity() {
             setTypeface(null, android.graphics.Typeface.BOLD)
         })
         content.addView(TextView(this).apply {
-            text = "Найди нужное место"
+            text = "Найди ближайший магазин"
             textSize = 27f
             setTextColor(0xFFF7F7F7.toInt())
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(0, dp(3), 0, 0)
         })
         content.addView(TextView(this).apply {
-            text = "Ближайшие точки · пешая навигация"
+            text = "Выбери сеть ниже или введи название. Ближайший филиал появится на карте."
             textSize = 13f
             setTextColor(0xFF9298A3.toInt())
             setPadding(0, 0, 0, dp(14))
@@ -124,7 +139,7 @@ class MainActivity : Activity() {
             background = rounded(0xFF191D23.toInt(), 18)
         }
         input = EditText(this).apply {
-            hint = "Например: аптека, супермаркет"
+            hint = "Например: Пятёрочка, Магнит, Перекрёсток"
             setTextColor(0xFFF4F4F4.toInt())
             setHintTextColor(0xFF7D8490.toInt())
             setSingleLine(true)
@@ -132,6 +147,30 @@ class MainActivity : Activity() {
             setPadding(dp(6), dp(9), dp(6), dp(9))
             background = null
         }
+        val quickScroll = android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            clipToPadding = false
+        }
+        val quickRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf("Пятёрочка", "Магнит", "Перекрёсток", "Дикси", "Лента", "ВкусВилл", "Чижик", "Верный", "Монетка", "Светофор", "Ашан", "METRO", "Аптека").forEach { network ->
+            val chip = Button(this).apply {
+                text = network
+                isAllCaps = false
+                textSize = 12f
+                minHeight = dp(38)
+                setPadding(dp(10), 0, dp(10), 0)
+                setTextColor(0xFFE9D49A.toInt())
+                background = rounded(0xFF29251B.toInt(), 18)
+                setOnClickListener {
+                    input.setText(network)
+                    input.setSelection(input.text.length)
+                    searchStores(network)
+                }
+            }
+            quickRow.addView(chip, LinearLayout.LayoutParams(-2, dp(38)).apply { marginEnd = dp(6) })
+        }
+        quickScroll.addView(quickRow)
+        searchPanel.addView(quickScroll)
         searchPanel.addView(input)
         suggestions = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -200,7 +239,7 @@ class MainActivity : Activity() {
         mapCard.addView(mapPage.view)
         content.addView(mapCard)
         content.addView(TextView(this).apply {
-            text = "ИНТЕРАКТИВНАЯ КАРТА"
+            text = "СИНЯЯ ТОЧКА — ТЫ · ЗОЛОТАЯ — МАГАЗИН · ЗЕЛЁНАЯ ЛИНИЯ — ПЕШИЙ МАРШРУТ"
             textSize = 10f
             letterSpacing = 0.12f
             setTextColor(0xFF9298A3.toInt())
@@ -213,13 +252,13 @@ class MainActivity : Activity() {
             setPadding(dp(2), dp(7), dp(2), dp(8))
         }
         resultsHeader.addView(TextView(this).apply {
-            text = "Рядом с тобой"
+            text = "Ближайшие филиалы сети"
             textSize = 19f
             setTextColor(0xFFF4F4F4.toInt())
             setTypeface(null, android.graphics.Typeface.BOLD)
         }, LinearLayout.LayoutParams(0, -2, 1f))
         resultsHeader.addView(TextView(this).apply {
-            text = "OSM"
+            text = "ПОИСК ПО СЕТИ"
             textSize = 11f
             setTextColor(0xFFD6B45A.toInt())
             setPadding(dp(9), dp(5), dp(9), dp(5))
@@ -230,7 +269,7 @@ class MainActivity : Activity() {
         content.addView(results)
 
         routeButton = Button(this).apply {
-            text = "Открыть пешую навигацию"
+            text = "Открыть маршрут в навигаторе"
             isEnabled = false
             isAllCaps = false
             setTextColor(0xFF171717.toInt())
@@ -256,11 +295,10 @@ class MainActivity : Activity() {
     private fun isRestrictedRetailQuery(value: String): Boolean {
         val normalized = value.lowercase(Locale.ROOT)
             .replace('ё', 'е')
-            .replace(Regex("\\s+"), " ")
+            .replace(Regex("[^\\p{L}\\p{N}]+"), " ")
             .trim()
         return listOf(
             "красное белое",
-            "красное&белое",
             "красное и белое",
             "алкомаркет",
             "винный магазин",
@@ -279,75 +317,93 @@ class MainActivity : Activity() {
         suggestionTask?.let(handler::removeCallbacks)
         suggestions.removeAllViews()
         val query = text.trim()
-        if (query.length < 2 || isRestrictedRetailQuery(query)) return
-        val task = object : Runnable {
-            override fun run() {
-                val wait = (1200L - (System.currentTimeMillis() - lastSuggestionRequest)).coerceAtLeast(0L)
-                if (wait > 0L) {
-                    handler.postDelayed(this, wait)
-                    return
-                }
-                lastSuggestionRequest = System.currentTimeMillis()
-                executor.execute {
-                    try {
-                        val found = StoreRepository.suggest(query)
-                        runOnUiThread {
-                            if (input.text.toString().trim() != query) return@runOnUiThread
-                            suggestions.removeAllViews()
-                            found.take(6).forEach { store ->
-                                val button = Button(this@MainActivity).apply {
-                                    setText("${store.name}\n${store.address}")
-                                    textSize = 12f
-                                    setOnClickListener {
-                                        input.setText(store.name)
-                                        input.setSelection(input.text.length)
-                                        suggestions.removeAllViews()
-                                        if (currentLocation != null) searchStores(store.name)
-                                        else info.text = "Название выбрано. Теперь укажи своё место вручную, чтобы найти ближайшие магазины."
-                                    }
-                                }
-                                suggestions.addView(button)
-                            }
-                        }
-                    } catch (_: Exception) {
-                        // Подсказки необязательны: основной поиск остаётся доступен кнопкой «Найти».
-                    }
+        if (query.isEmpty()) return
+
+        // Suggestions are network names, not individual geocoded branches.
+        val networks = listOf(
+            "Пятёрочка", "Магнит", "Перекрёсток", "Дикси", "Лента",
+            "Ашан", "ВкусВилл", "Чижик", "Верный", "Монетка", "Светофор", "METRO", "Супермаркет", "Аптека"
+        )
+        fun key(value: String) = value.lowercase(Locale.ROOT).replace('ё', 'е').replace(Regex("\\s+"), " ").trim()
+        val normalizedQuery = key(query)
+        val matches = networks.filter { key(it).contains(normalizedQuery) || normalizedQuery.contains(key(it)) }
+        val exact = networks.firstOrNull { key(it) == normalizedQuery }
+        val choices = (matches + if (exact == null) listOf(query) else emptyList()).distinct().take(5)
+        choices.forEach { network ->
+            val button = Button(this).apply {
+                text = "Искать сеть: $network"
+                isAllCaps = false
+                textSize = 13f
+                setOnClickListener {
+                    input.setText(network)
+                    input.setSelection(input.text.length)
+                    suggestions.removeAllViews()
+                    searchStores(network)
                 }
             }
+            suggestions.addView(button)
         }
-        suggestionTask = task
-        handler.postDelayed(task, 1200L)
     }
 
     private fun searchStores(forcedQuery: String? = null) {
+        mapPage.cancelPointPick()
         val location = currentLocation
         if (location == null) {
-            info.text = "Сначала укажи своё место вручную или попробуй GPS."
+            info.text = "Ожидаем точное местоположение. Нажми «Обновить GPS», если оно не появится."
             return
         }
         val query = (forcedQuery ?: input.text.toString()).trim()
         if (query.isEmpty()) {
-            info.text = "Введи название или категорию."
+            info.text = "Сначала введи название сети магазинов. Например, «Магнит»."
             return
         }
         if (isRestrictedRetailQuery(query)) {
-            info.text = "Поиск и прокладка маршрута к алкогольным магазинам недоступны. Можно искать обычные супермаркеты, аптеки и другие магазины."
+            info.text = "Поиск этой сети недоступен. Можно выбрать другую сеть или обычную категорию магазинов."
             return
         }
+        selectedNetwork = query
+        selectedStore = null
+        routeButton.isEnabled = false
+        getSharedPreferences("chosen", MODE_PRIVATE).edit()
+            .putString("network", query)
+            .remove("name").remove("address").remove("distance").remove("walk_distance").remove("walk_eta").remove("map").remove("lat").remove("lon")
+            .apply()
+        StoreWidget.update(this)
         suggestions.removeAllViews()
-        info.text = "Ищем магазины…"
+        info.text = "Ищем филиалы сети «$query» в радиусе 12 км…"
         results.removeAllViews()
+        results.addView(TextView(this).apply {
+            text = "Ищем филиалы по бренду и названию. Это может занять несколько секунд."
+            textSize = 12f
+            setTextColor(0xFF9298A3.toInt())
+            setPadding(dp(8), dp(8), dp(8), dp(10))
+        })
         executor.execute {
             try {
                 val found = StoreRepository.search(location.latitude, location.longitude, query, this)
                 runOnUiThread {
-                    info.text = if (found.isEmpty()) "Ничего не найдено. Попробуй другое название." else "Найдено: ${found.size}. Ближайшая точка выбрана автоматически."
-                    found.forEach { addStoreCard(it) }
-                    mapPage.show(location.latitude, location.longitude, found)
-                    if (found.isNotEmpty()) chooseStore(found.first())
+                    results.removeAllViews()
+                    if (found.isEmpty()) {
+                        info.text = "В радиусе 12 км филиалы «$query» не найдены. Попробуй другое написание или обнови GPS."
+                        mapPage.show(location.latitude, location.longitude, emptyList())
+                    } else {
+                        info.text = "Найдено филиалов: ${found.size}. Выбран ближайший — ${found.first().name}. На экране показаны ближайшие 10."
+                        found.take(10).forEach { addStoreCard(it) }
+                        mapPage.show(location.latitude, location.longitude, found.take(10))
+                        chooseStore(found.first(), query)
+                    }
                 }
             } catch (e: Exception) {
-                runOnUiThread { info.text = e.message ?: "Поиск временно недоступен. Повтори позже." }
+                runOnUiThread {
+                    results.removeAllViews()
+                    info.text = e.message ?: "Поиск временно недоступен. Попробуй ещё раз."
+                    results.addView(TextView(this).apply {
+                        text = "Проверь название сети и подключение к интернету. Можно попробовать ещё раз или выбрать другую сеть."
+                        textSize = 12f
+                        setTextColor(0xFF9298A3.toInt())
+                        setPadding(dp(8), dp(8), dp(8), dp(8))
+                    })
+                }
             }
         }
     }
@@ -364,7 +420,7 @@ class MainActivity : Activity() {
             textSize = 16f
         })
         card.addView(TextView(this).apply {
-            text = "${store.address}\n${formatDistance(store.distance)} от тебя"
+            text = "${store.address}\n${formatDistance(store.distance)} по прямой от тебя · пешее время уточняется по маршруту"
             setTextColor(0xFFB9C0CA.toInt())
             textSize = 12f
         })
@@ -378,13 +434,14 @@ class MainActivity : Activity() {
         results.addView(card, params)
     }
 
-    private fun chooseStore(store: Store) {
+    private fun chooseStore(store: Store, network: String? = null) {
         val location = currentLocation ?: run {
             info.text = "Сначала определи своё местоположение."
             locate()
             return
         }
         selectedStore = store
+        if (!network.isNullOrBlank()) selectedNetwork = network
         routeButton.isEnabled = true
         info.text = "Сохраняем выбранный магазин…"
         executor.execute {
@@ -402,8 +459,15 @@ class MainActivity : Activity() {
                 saved && imageFile.exists()
             } else false
             val distance = StoreRepository.distance(location.latitude, location.longitude, store.lat, store.lon)
+            val routeMeters = pathLength(walkingPath)
+            val etaMinutes = if (routeMeters > 0) kotlin.math.ceil(routeMeters / 80.0).toInt().coerceAtLeast(1) else 0
             getSharedPreferences("chosen", MODE_PRIVATE).edit()
+                .putString("user_lat", location.latitude.toString())
+                .putString("user_lon", location.longitude.toString())
+                .putString("walk_distance", if (routeMeters > 0) formatDistance(routeMeters) else "")
+                .putString("walk_eta", if (etaMinutes > 0) "~$etaMinutes мин пешком" else "")
                 .putString("name", store.name)
+                .putString("network", selectedNetwork)
                 .putString("address", store.address)
                 .putString("distance", formatDistance(distance))
                 .putString("map", if (mapSaved) imageFile.absolutePath else null)
@@ -411,12 +475,13 @@ class MainActivity : Activity() {
                 .putString("lon", store.lon.toString())
                 .apply()
             lastRouteLocation = Location(location)
+            lastNetworkLocation = Location(location)
             lastRouteRefreshAt = System.currentTimeMillis()
             runOnUiThread {
                 StoreWidget.update(this)
                 mapPage.show(location.latitude, location.longitude, listOf(store), walkingPath)
                 info.text = if (walkingPath.size >= 2) {
-                    "Ближайшая точка: ${store.name}. Зелёная линия показывает пеший маршрут."
+                    "Ближайшая точка: ${store.name}. Пешком ${formatDistance(pathLength(walkingPath))} · около ${kotlin.math.ceil(pathLength(walkingPath) / 80.0).toInt()} мин. Зелёная линия — маршрут."
                 } else {
                     "Выбрана точка: ${store.name}. Не удалось загрузить линию маршрута; попробуй открыть навигацию."
                 }
@@ -436,42 +501,72 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), 0, dp(16), 0)
         }
-        val nameInput = EditText(this).apply { hint = "Название магазина" }
-        val addressInput = EditText(this).apply { hint = "Полный адрес: улица, дом, город" }
+        val nameInput = EditText(this).apply { hint = "Название точки"; setSingleLine(true) }
+        val addressInput = EditText(this).apply { hint = "Адрес (необязательно, если выберешь точку на карте)" }
         fields.addView(nameInput)
         fields.addView(addressInput)
-        AlertDialog.Builder(this)
-            .setTitle("Добавить магазин")
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Добавить свою точку")
+            .setMessage("Можно найти адрес автоматически или просто поставить точку на карте.")
             .setView(fields)
             .setNegativeButton("Отмена", null)
-            .setPositiveButton("Сохранить") { _, _ ->
+            .setNeutralButton("Выбрать на карте", null)
+            .setPositiveButton("Найти адрес и сохранить", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
                 val name = nameInput.text.toString().trim()
                 val address = addressInput.text.toString().trim()
-                if (name.isEmpty() || address.isEmpty()) {
-                    info.text = "Заполни название и адрес."
-                    return@setPositiveButton
+                if (name.isBlank()) {
+                    info.text = "Сначала укажи название точки."
+                    return@setOnClickListener
                 }
-                info.text = "Ищем координаты адреса…"
+                dialog.dismiss()
+                info.text = "Режим выбора точки: прокрути к карте и нажми на нужное место."
+                mapPage.pickPointOnce { lat, lon ->
+                    info.text = "Сохраняем точку и уточняем адрес…"
+                    executor.execute {
+                        val label = address.ifBlank { runCatching { StoreRepository.reverseGeocode(lat, lon) }.getOrNull() ?: "Точка на карте" }
+                        StoreRepository.save(this, name, label, lat, lon)
+                        val user = currentLocation
+                        val distance = if (user == null) 0.0 else StoreRepository.distance(user.latitude, user.longitude, lat, lon)
+                        val store = Store(name, label, lat, lon, distance)
+                        runOnUiThread {
+                            addStoreCard(store)
+                            if (user != null) mapPage.show(user.latitude, user.longitude, listOf(store))
+                            info.text = "Точка «$name» сохранена · $label"
+                        }
+                    }
+                }
+            }
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val name = nameInput.text.toString().trim()
+                val address = addressInput.text.toString().trim()
+                if (name.isBlank() || address.isBlank()) {
+                    info.text = "Для поиска адреса заполни название и адрес. Или выбери точку на карте."
+                    return@setOnClickListener
+                }
+                info.text = "Ищем адрес…"
                 executor.execute {
                     try {
                         val point = StoreRepository.geocode(address)
                         StoreRepository.save(this, name, address, point.first, point.second)
-                        val location = currentLocation
-                        val distance = if (location == null) 0.0 else StoreRepository.distance(
-                            location.latitude, location.longitude, point.first, point.second
-                        )
+                        val user = currentLocation
+                        val distance = if (user == null) 0.0 else StoreRepository.distance(user.latitude, user.longitude, point.first, point.second)
                         val store = Store(name, address, point.first, point.second, distance)
                         runOnUiThread {
+                            dialog.dismiss()
                             addStoreCard(store)
-                            info.text = "Магазин сохранён на этом телефоне."
-                            if (location != null) mapPage.show(location.latitude, location.longitude, listOf(store))
+                            info.text = "Точка «$name» сохранена."
+                            if (user != null) mapPage.show(user.latitude, user.longitude, listOf(store))
                         }
                     } catch (e: Exception) {
-                        runOnUiThread { info.text = e.message ?: "Не удалось найти адрес." }
+                        runOnUiThread { info.text = e.message ?: "Не удалось найти адрес. Попробуй выбрать точку на карте." }
                     }
                 }
             }
-            .show()
+        }
+        dialog.show()
     }
 
     private fun showSetLocationDialog() {
@@ -484,16 +579,47 @@ class MainActivity : Activity() {
             setPadding(dp(18), 0, dp(18), 0)
             addView(addressInput)
         }
-        AlertDialog.Builder(this)
-            .setTitle("Где ты находишься?")
-            .setMessage("Введи город или адрес. Это заменит ошибочные GPS-координаты.")
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Указать своё местоположение")
+            .setMessage("Введи адрес или выбери точку прямо на карте. Это поможет, если GPS ошибается.")
             .setView(container)
             .setNegativeButton("Отмена", null)
-            .setPositiveButton("Найти место") { _, _ ->
+            .setNeutralButton("Выбрать на карте", null)
+            .setPositiveButton("Найти адрес", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                dialog.dismiss()
+                info.text = "Выбор местоположения: прокрути к карте и нажми на своё место."
+                mapPage.pickPointOnce { lat, lon ->
+                    info.text = "Уточняем адрес выбранной точки…"
+                    executor.execute {
+                        val label = runCatching { StoreRepository.reverseGeocode(lat, lon) }.getOrNull() ?: "Точка выбрана на карте"
+                        val manual = Location("manual_map").apply {
+                            latitude = lat; longitude = lon; accuracy = 0f; time = System.currentTimeMillis()
+                        }
+                        getSharedPreferences("manual_location", MODE_PRIVATE).edit()
+                            .putString("lat", lat.toString())
+                            .putString("lon", lon.toString())
+                            .putString("label", label)
+                            .apply()
+                        runOnUiThread {
+                            setCurrentLocation(manual, manual = true)
+                            info.text = "Местоположение задано: $label"
+                            val savedNetwork = getSharedPreferences("chosen", MODE_PRIVATE).getString("network", null)
+                            if (!savedNetwork.isNullOrBlank()) {
+                                input.setText(savedNetwork)
+                                searchStores(savedNetwork)
+                            }
+                        }
+                    }
+                }
+            }
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val address = addressInput.text.toString().trim()
                 if (address.isEmpty()) {
-                    info.text = "Введи хотя бы название города."
-                    return@setPositiveButton
+                    info.text = "Введи адрес или выбери точку на карте."
+                    return@setOnClickListener
                 }
                 info.text = "Определяем указанное место…"
                 executor.execute {
@@ -510,40 +636,79 @@ class MainActivity : Activity() {
                             .putString("lon", point.second.toString())
                             .putString("label", address)
                             .apply()
-                        runOnUiThread { setCurrentLocation(manual, manual = true) }
+                        runOnUiThread {
+                            dialog.dismiss()
+                            setCurrentLocation(manual, manual = true)
+                            val savedNetwork = getSharedPreferences("chosen", MODE_PRIVATE).getString("network", null)
+                            if (!savedNetwork.isNullOrBlank()) {
+                                input.setText(savedNetwork)
+                                searchStores(savedNetwork)
+                            }
+                        }
                     } catch (e: Exception) {
-                        runOnUiThread { info.text = e.message ?: "Не удалось найти это место. Уточни адрес." }
+                        runOnUiThread { info.text = e.message ?: "Не удалось найти адрес. Попробуй выбрать точку на карте." }
                     }
                 }
             }
-            .show()
+        }
+        dialog.show()
     }
 
     private fun locate() {
+        mapPage.cancelPointPick()
         if (!hasLocationPermission()) {
             requestLocationPermission()
             return
         }
-        info.text = "Получаем новое местоположение…"
+        info.text = "Получаем свежее местоположение от GPS…"
         try {
-            locationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+            val request = CurrentLocationRequest.Builder()
+                .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+                .setMaxUpdateAgeMillis(0L)
+                .setDurationMillis(25000L)
+                .build()
+            locationClient.getCurrentLocation(request, null)
                 .addOnSuccessListener { location ->
                     if (location == null) {
-                        info.text = "Не удалось получить новое местоположение. Включи геолокацию и попробуй ещё раз."
+                        useSavedManualLocationOrWait("Телефон пока не получил GPS. Проверь геолокацию или задай точку вручную.")
                     } else {
                         val age = System.currentTimeMillis() - location.time
-                        if (age > 120_000L || age < -30_000L) {
-                            info.text = "Получены устаревшие координаты. Подожди немного и нажми «Моё место» ещё раз."
+                        if (age > 45000L || age < -15000L || location.accuracy > 150f) {
+                            useSavedManualLocationOrWait("GPS пока неточный (±${location.accuracy.roundToInt()} м). Ждём более точную точку.")
+                            startLiveLocation()
                         } else {
                             getSharedPreferences("manual_location", MODE_PRIVATE).edit().clear().apply()
                             setCurrentLocation(location, manual = false)
                             startLiveLocation()
+                            val savedNetwork = getSharedPreferences("chosen", MODE_PRIVATE).getString("network", null)
+                            if (!savedNetwork.isNullOrBlank()) {
+                                input.setText(savedNetwork)
+                                searchStores(savedNetwork)
+                            }
                         }
                     }
                 }
-                .addOnFailureListener { info.text = "Служба геолокации не ответила. Проверь разрешения и GPS." }
+                .addOnFailureListener { useSavedManualLocationOrWait("Геолокация не ответила. Проверь разрешения и включён ли GPS.") }
         } catch (_: SecurityException) {
-            info.text = "Нет разрешения на геолокацию."
+            info.text = "Нет разрешения на геолокацию. Разреши доступ в настройках Android."
+        }
+    }
+
+    private fun useSavedManualLocationOrWait(message: String) {
+        val prefs = getSharedPreferences("manual_location", MODE_PRIVATE)
+        val lat = prefs.getString("lat", null)?.toDoubleOrNull()
+        val lon = prefs.getString("lon", null)?.toDoubleOrNull()
+        if (lat != null && lon != null && lat in -90.0..90.0 && lon in -180.0..180.0) {
+            val saved = Location("manual_saved").apply {
+                latitude = lat; longitude = lon; accuracy = 0f; time = System.currentTimeMillis()
+            }
+            setCurrentLocation(saved, manual = true)
+            info.text = "Используем сохранённую вручную точку: ${prefs.getString("label", "место")}. $message"
+            val network = getSharedPreferences("chosen", MODE_PRIVATE).getString("network", null)
+            if (!network.isNullOrBlank()) { input.setText(network); searchStores(network) }
+        } else {
+            info.text = message
+            startLiveLocation()
         }
     }
 
@@ -551,12 +716,16 @@ class MainActivity : Activity() {
         manualLocationMode = manual
         if (manual) stopLiveLocation()
         currentLocation = location
+        getSharedPreferences("chosen", MODE_PRIVATE).edit()
+            .putString("user_lat", location.latitude.toString())
+            .putString("user_lon", location.longitude.toString())
+            .apply()
         selectedStore = null
         routeButton.isEnabled = false
         info.text = if (manual) {
             "Место задано вручную. GPS не используется. Введи название магазина."
         } else {
-            "Координаты получены от телефона. Если точка неверная, задай место вручную."
+            "GPS получен · точность ±${location.accuracy.roundToInt()} м. Ищем рядом с этой точкой."
         }
         mapPage.show(location.latitude, location.longitude, emptyList())
     }
@@ -598,7 +767,13 @@ class MainActivity : Activity() {
                 catch (_: Exception) { false }
                 finally { bitmap.recycle() }
             } else false
+            val routeMeters = pathLength(path)
+            val etaMinutes = if (routeMeters > 0) kotlin.math.ceil(routeMeters / 80.0).toInt().coerceAtLeast(1) else 0
             getSharedPreferences("chosen", MODE_PRIVATE).edit()
+                .putString("user_lat", location.latitude.toString())
+                .putString("user_lon", location.longitude.toString())
+                .putString("walk_distance", if (routeMeters > 0) formatDistance(routeMeters) else "")
+                .putString("walk_eta", if (etaMinutes > 0) "~$etaMinutes мин пешком" else "")
                 .putString("distance", formatDistance(distance))
                 .putString("map", if (saved) imageFile.absolutePath else null)
                 .apply()
@@ -608,9 +783,29 @@ class MainActivity : Activity() {
                     mapPage.show(location.latitude, location.longitude, listOf(store), path)
                     StoreWidget.update(this)
                     info.text = if (path.size >= 2) {
-                        "Маршрут обновлён · ${formatDistance(distance)} по прямой до точки"
+                        "Маршрут обновлён · пешком ${formatDistance(pathLength(path))} · примерно ${kotlin.math.ceil(pathLength(path) / 80.0).toInt()} мин"
                     } else {
                         "GPS обновлён, но сервис пешего маршрута пока не ответил."
+                    }
+                }
+            }
+        }
+    }
+
+    private fun refreshNearestNetwork(location: Location, network: String) {
+        if (networkRefreshRunning) return
+        networkRefreshRunning = true
+        lastNetworkRefreshAt = System.currentTimeMillis()
+        executor.execute {
+            val nearest = runCatching {
+                StoreRepository.search(location.latitude, location.longitude, network, this).firstOrNull()
+            }.getOrNull()
+            runOnUiThread {
+                networkRefreshRunning = false
+                if (selectedNetwork == network && nearest != null) {
+                    val current = selectedStore
+                    if (current == null || current.lat != nearest.lat || current.lon != nearest.lon) {
+                        chooseStore(nearest, network)
                     }
                 }
             }
@@ -629,6 +824,12 @@ class MainActivity : Activity() {
         )
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent?.getBooleanExtra("widget_refresh", false) == true) locate()
+    }
+
     @Deprecated("Deprecated in Android API; retained for compatibility")
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
@@ -636,6 +837,15 @@ class MainActivity : Activity() {
             if (grantResults.any { it == PackageManager.PERMISSION_GRANTED }) locate()
             else info.text = "Разреши доступ к местоположению в настройках."
         }
+    }
+
+    private fun pathLength(points: List<Pair<Double, Double>>): Double {
+        if (points.size < 2) return 0.0
+        var total = 0.0
+        for (i in 1 until points.size) {
+            total += StoreRepository.distance(points[i - 1].first, points[i - 1].second, points[i].first, points[i].second)
+        }
+        return total
     }
 
     private fun formatDistance(meters: Double): String = if (meters < 1000) {
