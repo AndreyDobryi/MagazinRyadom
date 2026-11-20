@@ -21,6 +21,9 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationResult
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -40,7 +43,30 @@ class MainActivity : Activity() {
     private var selectedStore: Store? = null
     private var suggestionTask: Runnable? = null
     private var lastSuggestionRequest = 0L
+    private var manualLocationMode = false
+    private var lastRouteLocation: Location? = null
+    private var lastRouteRefreshAt = 0L
+    private var routeRefreshRunning = false
+    private var isTrackingLocation = false
     private val locationRequestCode = 22
+    private val locationCallback = object : LocationCallback() {
+        override fun onLocationResult(result: LocationResult) {
+            val fresh = result.lastLocation ?: return
+            if (manualLocationMode) return
+            currentLocation = fresh
+            val target = selectedStore
+            if (target == null) {
+                mapPage.show(fresh.latitude, fresh.longitude, emptyList())
+                info.text = "GPS обновлён · точность около ${fresh.accuracy.roundToInt()} м"
+                return
+            }
+            val previous = lastRouteLocation
+            val moved = previous?.distanceTo(fresh) ?: Float.MAX_VALUE
+            if (moved >= 25f && System.currentTimeMillis() - lastRouteRefreshAt >= 20000L) {
+                refreshRouteForMovement(fresh, target)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,36 +88,56 @@ class MainActivity : Activity() {
     private fun buildUi(savedInstanceState: Bundle?) {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(12))
-            setBackgroundColor(0xFF101114.toInt())
+            setPadding(dp(14), dp(12), dp(14), dp(10))
+            setBackgroundColor(0xFF0D0F12.toInt())
         }
-        val scroll = ScrollView(this)
-        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val scroll = ScrollView(this).apply { clipToPadding = false }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, dp(14))
+        }
 
         content.addView(TextView(this).apply {
-            text = "Магазин рядом"
-            textSize = 26f
-            setTextColor(0xFFFFFFFF.toInt())
+            text = "МАГАЗИН РЯДОМ"
+            textSize = 11f
+            letterSpacing = 0.16f
+            setTextColor(0xFFD6B45A.toInt())
             setTypeface(null, android.graphics.Typeface.BOLD)
         })
         content.addView(TextView(this).apply {
-            text = "Поиск магазинов · OpenStreetMap"
+            text = "Найди нужное место"
+            textSize = 27f
+            setTextColor(0xFFF7F7F7.toInt())
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, dp(3), 0, 0)
+        })
+        content.addView(TextView(this).apply {
+            text = "Ближайшие точки · пешая навигация"
             textSize = 13f
-            setTextColor(0xFFAAAAAA.toInt())
+            setTextColor(0xFF9298A3.toInt())
+            setPadding(0, 0, 0, dp(14))
         })
 
-        input = EditText(this).apply {
-            hint = "Название или категория магазина"
-            setTextColor(0xFFFFFFFF.toInt())
-            setHintTextColor(0xFF999999.toInt())
-            setSingleLine(true)
+        val searchPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(0xFF191D23.toInt(), 18)
         }
-        content.addView(input)
+        input = EditText(this).apply {
+            hint = "Например: аптека, супермаркет"
+            setTextColor(0xFFF4F4F4.toInt())
+            setHintTextColor(0xFF7D8490.toInt())
+            setSingleLine(true)
+            textSize = 16f
+            setPadding(dp(6), dp(9), dp(6), dp(9))
+            background = null
+        }
+        searchPanel.addView(input)
         suggestions = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, dp(4))
         }
-        content.addView(suggestions)
+        searchPanel.addView(suggestions)
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -99,58 +145,107 @@ class MainActivity : Activity() {
             }
             override fun afterTextChanged(s: Editable?) = Unit
         })
-
-        val buttons = LinearLayout(this)
-        buttons.addView(Button(this).apply {
-            text = "Найти"
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val findButton = Button(this).apply {
+            text = "Найти рядом"
+            isAllCaps = false
+            setTextColor(0xFF171717.toInt())
+            background = rounded(0xFFD6B45A.toInt(), 12)
             setOnClickListener { searchStores() }
-        }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        buttons.addView(Button(this).apply {
-            text = "Моё место (GPS)"
+        }
+        actions.addView(findButton, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(6) })
+        val gpsButton = Button(this).apply {
+            text = "Обновить GPS"
+            isAllCaps = false
+            setTextColor(0xFFE8EAF0.toInt())
+            background = rounded(0xFF303640.toInt(), 12)
             setOnClickListener { locate() }
-        }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        content.addView(buttons)
+        }
+        actions.addView(gpsButton, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(6) })
+        searchPanel.addView(actions)
+        content.addView(searchPanel)
 
-        content.addView(Button(this).apply {
-            text = "Указать моё место вручную"
+        val utilityRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        utilityRow.addView(Button(this).apply {
+            text = "Моё место вручную"
+            isAllCaps = false
+            textSize = 12f
             setOnClickListener { showSetLocationDialog() }
-        })
-
-        content.addView(Button(this).apply {
-            text = "＋ Добавить магазин вручную"
+        }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(4) })
+        utilityRow.addView(Button(this).apply {
+            text = "+ Добавить точку"
+            isAllCaps = false
+            textSize = 12f
             setOnClickListener { showAddDialog() }
-        })
+        }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(4) })
+        content.addView(utilityRow)
 
         info = TextView(this).apply {
-            text = "Определяем координаты…"
+            text = "Определяем местоположение…"
+            textSize = 13f
             setTextColor(0xFFD6B45A.toInt())
-            setPadding(0, dp(8), 0, dp(8))
+            setPadding(dp(4), dp(5), dp(4), dp(10))
         }
         content.addView(info)
 
+        val mapCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(5), dp(5), dp(5), dp(5))
+            background = rounded(0xFF191D23.toInt(), 18)
+        }
         mapPage = MapPage(this, savedInstanceState)
-        content.addView(mapPage.view)
+        mapCard.addView(mapPage.view)
+        content.addView(mapCard)
         content.addView(TextView(this).apply {
-            text = "Результаты поиска"
-            textSize = 18f
-            setTextColor(0xFFFFFFFF.toInt())
-            setPadding(0, dp(10), 0, dp(4))
+            text = "ИНТЕРАКТИВНАЯ КАРТА"
+            textSize = 10f
+            letterSpacing = 0.12f
+            setTextColor(0xFF9298A3.toInt())
+            setPadding(dp(5), dp(7), 0, dp(8))
         })
+
+        val resultsHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dp(2), dp(7), dp(2), dp(8))
+        }
+        resultsHeader.addView(TextView(this).apply {
+            text = "Рядом с тобой"
+            textSize = 19f
+            setTextColor(0xFFF4F4F4.toInt())
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        resultsHeader.addView(TextView(this).apply {
+            text = "OSM"
+            textSize = 11f
+            setTextColor(0xFFD6B45A.toInt())
+            setPadding(dp(9), dp(5), dp(9), dp(5))
+            background = rounded(0xFF29251B.toInt(), 20)
+        })
+        content.addView(resultsHeader)
         results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(results)
 
         routeButton = Button(this).apply {
-            text = "Показать пеший маршрут"
+            text = "Открыть пешую навигацию"
             isEnabled = false
+            isAllCaps = false
+            setTextColor(0xFF171717.toInt())
+            background = rounded(0xFFD6B45A.toInt(), 14)
             setOnClickListener { openWalkingRoute() }
         }
-        content.addView(routeButton)
-
+        content.addView(routeButton, LinearLayout.LayoutParams(-1, dp(50)).apply {
+            topMargin = dp(8)
+            bottomMargin = dp(8)
+        })
         content.addView(TextView(this).apply {
-            text = "Карта: © OpenStreetMap contributors"
-            textSize = 11f
-            setTextColor(0xFFAAAAAA.toInt())
-            setPadding(0, dp(5), 0, 0)
+            text = "Карта и данные: © OpenStreetMap contributors. GPS обновляется, пока приложение открыто."
+            textSize = 10f
+            setTextColor(0xFF777E89.toInt())
+            setPadding(dp(3), dp(4), dp(3), 0)
         })
 
         scroll.addView(content)
@@ -158,11 +253,33 @@ class MainActivity : Activity() {
         setContentView(root)
     }
 
+    private fun isRestrictedRetailQuery(value: String): Boolean {
+        val normalized = value.lowercase(Locale.ROOT)
+            .replace('ё', 'е')
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        return listOf(
+            "красное белое",
+            "красное&белое",
+            "красное и белое",
+            "алкомаркет",
+            "винный магазин",
+            "магазин алкоголя",
+            "алкогольный магазин"
+        ).any { normalized.contains(it) }
+    }
+
+    private fun rounded(color: Int, radiusDp: Int): android.graphics.drawable.GradientDrawable =
+        android.graphics.drawable.GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = dp(radiusDp).toFloat()
+        }
+
     private fun scheduleSuggestions(text: String) {
         suggestionTask?.let(handler::removeCallbacks)
         suggestions.removeAllViews()
         val query = text.trim()
-        if (query.length < 2) return
+        if (query.length < 2 || isRestrictedRetailQuery(query)) return
         val task = object : Runnable {
             override fun run() {
                 val wait = (1200L - (System.currentTimeMillis() - lastSuggestionRequest)).coerceAtLeast(0L)
@@ -213,6 +330,10 @@ class MainActivity : Activity() {
             info.text = "Введи название или категорию."
             return
         }
+        if (isRestrictedRetailQuery(query)) {
+            info.text = "Поиск и прокладка маршрута к алкогольным магазинам недоступны. Можно искать обычные супермаркеты, аптеки и другие магазины."
+            return
+        }
         suggestions.removeAllViews()
         info.text = "Ищем магазины…"
         results.removeAllViews()
@@ -234,8 +355,8 @@ class MainActivity : Activity() {
     private fun addStoreCard(store: Store) {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-            setBackgroundColor(0xFF25282E.toInt())
+            setPadding(dp(13), dp(11), dp(13), dp(10))
+            background = rounded(0xFF1B2027.toInt(), 15)
         }
         card.addView(TextView(this).apply {
             text = store.name
@@ -243,11 +364,13 @@ class MainActivity : Activity() {
             textSize = 16f
         })
         card.addView(TextView(this).apply {
-            text = "${store.address} · ${formatDistance(store.distance)}"
-            setTextColor(0xFFD6B45A.toInt())
+            text = "${store.address}\n${formatDistance(store.distance)} от тебя"
+            setTextColor(0xFFB9C0CA.toInt())
+            textSize = 12f
         })
         card.addView(Button(this).apply {
-            text = "Выбрать этот магазин"
+            text = "Построить маршрут"
+            isAllCaps = false
             setOnClickListener { chooseStore(store) }
         })
         val params = LinearLayout.LayoutParams(-1, -2)
@@ -270,7 +393,7 @@ class MainActivity : Activity() {
             } catch (_: Exception) { emptyList() }
             val imageFile = File(cacheDir, "widget-map.png")
             imageFile.delete()
-            val bitmap = MapTile.make(location.latitude, location.longitude, store.lat, store.lon)
+            val bitmap = MapTile.make(location.latitude, location.longitude, store.lat, store.lon, walkingPath)
             val mapSaved = if (bitmap != null) {
                 val saved = try {
                     imageFile.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, it) }
@@ -287,6 +410,8 @@ class MainActivity : Activity() {
                 .putString("lat", store.lat.toString())
                 .putString("lon", store.lon.toString())
                 .apply()
+            lastRouteLocation = Location(location)
+            lastRouteRefreshAt = System.currentTimeMillis()
             runOnUiThread {
                 StoreWidget.update(this)
                 mapPage.show(location.latitude, location.longitude, listOf(store), walkingPath)
@@ -412,6 +537,7 @@ class MainActivity : Activity() {
                         } else {
                             getSharedPreferences("manual_location", MODE_PRIVATE).edit().clear().apply()
                             setCurrentLocation(location, manual = false)
+                            startLiveLocation()
                         }
                     }
                 }
@@ -422,6 +548,8 @@ class MainActivity : Activity() {
     }
 
     private fun setCurrentLocation(location: Location, manual: Boolean = false) {
+        manualLocationMode = manual
+        if (manual) stopLiveLocation()
         currentLocation = location
         selectedStore = null
         routeButton.isEnabled = false
@@ -431,6 +559,62 @@ class MainActivity : Activity() {
             "Координаты получены от телефона. Если точка неверная, задай место вручную."
         }
         mapPage.show(location.latitude, location.longitude, emptyList())
+    }
+
+    private fun startLiveLocation() {
+        if (manualLocationMode || isTrackingLocation || !hasLocationPermission()) return
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 6000L)
+            .setMinUpdateIntervalMillis(3000L)
+            .setMinUpdateDistanceMeters(8f)
+            .setWaitForAccurateLocation(false)
+            .build()
+        try {
+            locationClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
+            isTrackingLocation = true
+        } catch (_: SecurityException) {
+            info.text = "Нет разрешения на постоянное обновление GPS."
+        }
+    }
+
+    private fun stopLiveLocation() {
+        try { locationClient.removeLocationUpdates(locationCallback) } catch (_: Exception) { }
+        isTrackingLocation = false
+    }
+
+    private fun refreshRouteForMovement(location: Location, store: Store) {
+        if (routeRefreshRunning) return
+        routeRefreshRunning = true
+        lastRouteRefreshAt = System.currentTimeMillis()
+        lastRouteLocation = Location(location)
+        executor.execute {
+            val path = try {
+                StoreRepository.walkingRoute(location.latitude, location.longitude, store.lat, store.lon)
+            } catch (_: Exception) { emptyList() }
+            val distance = StoreRepository.distance(location.latitude, location.longitude, store.lat, store.lon)
+            val imageFile = File(cacheDir, "widget-map.png")
+            val bitmap = MapTile.make(location.latitude, location.longitude, store.lat, store.lon, path)
+            val saved = if (bitmap != null) {
+                try { imageFile.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 88, it) } }
+                catch (_: Exception) { false }
+                finally { bitmap.recycle() }
+            } else false
+            getSharedPreferences("chosen", MODE_PRIVATE).edit()
+                .putString("distance", formatDistance(distance))
+                .putString("map", if (saved) imageFile.absolutePath else null)
+                .apply()
+            runOnUiThread {
+                routeRefreshRunning = false
+                if (selectedStore?.lat == store.lat && selectedStore?.lon == store.lon) {
+                    mapPage.show(location.latitude, location.longitude, listOf(store), path)
+                    StoreWidget.update(this)
+                    info.text = if (path.size >= 2) {
+                        "Маршрут обновлён · ${formatDistance(distance)} по прямой до точки"
+                    } else {
+                        "GPS обновлён, но сервис пешего маршрута пока не ответил."
+                    }
+                }
+            }
+        }
     }
 
     private fun hasLocationPermission(): Boolean =
@@ -463,13 +647,22 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
     override fun onStart() { super.onStart(); mapPage.onStart() }
-    override fun onResume() { super.onResume(); mapPage.onResume() }
-    override fun onPause() { mapPage.onPause(); super.onPause() }
+    override fun onResume() {
+        super.onResume()
+        mapPage.onResume()
+        if (!manualLocationMode && hasLocationPermission()) startLiveLocation()
+    }
+    override fun onPause() {
+        stopLiveLocation()
+        mapPage.onPause()
+        super.onPause()
+    }
     override fun onStop() { mapPage.onStop(); super.onStop() }
     override fun onLowMemory() { super.onLowMemory(); mapPage.onLowMemory() }
     override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); mapPage.onSaveInstanceState(outState) }
 
     override fun onDestroy() {
+        stopLiveLocation()
         suggestionTask?.let(handler::removeCallbacks)
         executor.shutdown()
         mapPage.onDestroy()

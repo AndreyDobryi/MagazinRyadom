@@ -27,11 +27,15 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
         view = MapView(context)
         view.layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            (300 * context.resources.displayMetrics.density).toInt()
+            (360 * context.resources.displayMetrics.density).toInt()
         )
         view.onCreate(savedInstanceState)
         view.getMapAsync { mapboxMap ->
             map = mapboxMap
+            mapboxMap.uiSettings.isScrollGesturesEnabled = true
+            mapboxMap.uiSettings.isZoomGesturesEnabled = true
+            mapboxMap.uiSettings.isRotateGesturesEnabled = true
+            mapboxMap.uiSettings.isTiltGesturesEnabled = true
             mapboxMap.setStyle(Style.Builder().fromJson(styleJson())) {
                 styleReady = true
                 renderPending()
