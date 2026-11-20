@@ -140,7 +140,7 @@ class MainActivity : Activity() {
         content.addView(results)
 
         routeButton = Button(this).apply {
-            text = "Построить пеший маршрут"
+            text = "Показать пеший маршрут"
             isEnabled = false
             setOnClickListener { openWalkingRoute() }
         }
@@ -220,9 +220,10 @@ class MainActivity : Activity() {
             try {
                 val found = StoreRepository.search(location.latitude, location.longitude, query, this)
                 runOnUiThread {
-                    info.text = if (found.isEmpty()) "Ничего не найдено. Попробуй другое название." else "Найдено: ${found.size}. Нажми «Выбрать этот магазин»."
+                    info.text = if (found.isEmpty()) "Ничего не найдено. Попробуй другое название." else "Найдено: ${found.size}. Ближайшая точка выбрана автоматически."
                     found.forEach { addStoreCard(it) }
                     mapPage.show(location.latitude, location.longitude, found)
+                    if (found.isNotEmpty()) chooseStore(found.first())
                 }
             } catch (e: Exception) {
                 runOnUiThread { info.text = e.message ?: "Поиск временно недоступен. Повтори позже." }
@@ -264,6 +265,9 @@ class MainActivity : Activity() {
         routeButton.isEnabled = true
         info.text = "Сохраняем выбранный магазин…"
         executor.execute {
+            val walkingPath = try {
+                StoreRepository.walkingRoute(location.latitude, location.longitude, store.lat, store.lon)
+            } catch (_: Exception) { emptyList() }
             val imageFile = File(cacheDir, "widget-map.png")
             imageFile.delete()
             val bitmap = MapTile.make(location.latitude, location.longitude, store.lat, store.lon)
@@ -285,7 +289,12 @@ class MainActivity : Activity() {
                 .apply()
             runOnUiThread {
                 StoreWidget.update(this)
-                info.text = "Выбран магазин: ${store.name}. Виджет обновлён."
+                mapPage.show(location.latitude, location.longitude, listOf(store), walkingPath)
+                info.text = if (walkingPath.size >= 2) {
+                    "Ближайшая точка: ${store.name}. Зелёная линия показывает пеший маршрут."
+                } else {
+                    "Выбрана точка: ${store.name}. Не удалось загрузить линию маршрута; попробуй открыть навигацию."
+                }
             }
         }
     }

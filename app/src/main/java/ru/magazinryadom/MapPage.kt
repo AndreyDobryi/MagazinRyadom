@@ -4,11 +4,14 @@ import android.content.Context
 import android.view.ViewGroup
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraPosition
+import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.Style
 import org.maplibre.android.annotations.MarkerOptions
+import org.maplibre.android.annotations.PolylineOptions
+import android.graphics.Color
 
 /** Нативная карта MapLibre. Базовый стиль использует растровые тайлы OSM. */
 class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
@@ -17,13 +20,14 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
     private var styleReady = false
     private var pendingUser: LatLng? = null
     private var pendingStores: List<Store> = emptyList()
+    private var pendingRoute: List<Pair<Double, Double>> = emptyList()
 
     init {
         MapLibre.getInstance(context.applicationContext)
         view = MapView(context)
         view.layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            (230 * context.resources.displayMetrics.density).toInt()
+            (300 * context.resources.displayMetrics.density).toInt()
         )
         view.onCreate(savedInstanceState)
         view.getMapAsync { mapboxMap ->
@@ -35,9 +39,10 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
         }
     }
 
-    fun show(latitude: Double, longitude: Double, stores: List<Store>) {
+    fun show(latitude: Double, longitude: Double, stores: List<Store>, route: List<Pair<Double, Double>> = emptyList()) {
         pendingUser = LatLng(latitude, longitude)
         pendingStores = stores
+        pendingRoute = route
         renderPending()
     }
 
@@ -47,6 +52,10 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
         val user = pendingUser ?: return
         activeMap.clear()
         activeMap.addMarker(MarkerOptions().position(user).title("Вы здесь"))
+        if (pendingRoute.size >= 2) {
+            val points = pendingRoute.map { LatLng(it.first, it.second) }
+            activeMap.addPolyline(PolylineOptions().addAll(points).color(Color.rgb(35, 170, 95)).width(6f))
+        }
         pendingStores.forEach { store ->
             activeMap.addMarker(
                 MarkerOptions()
@@ -56,10 +65,17 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
             )
         }
         val target = pendingStores.firstOrNull()?.let { LatLng(it.lat, it.lon) } ?: user
-        activeMap.setCameraPosition(CameraPosition.Builder()
-            .target(target)
-            .zoom(if (pendingStores.isEmpty()) 14.5 else 13.5)
-            .build())
+        if (pendingRoute.size >= 2) {
+            val bounds = org.maplibre.android.geometry.LatLngBounds.Builder().apply {
+                pendingRoute.forEach { include(LatLng(it.first, it.second)) }
+            }.build()
+            activeMap.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 48))
+        } else {
+            activeMap.setCameraPosition(CameraPosition.Builder()
+                .target(target)
+                .zoom(if (pendingStores.isEmpty()) 14.5 else 14.0)
+                .build())
+        }
     }
 
     fun onStart() = view.onStart()

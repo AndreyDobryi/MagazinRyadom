@@ -19,11 +19,13 @@ object StoreRepository {
     fun search(lat: Double, lon: Double, term: String, ctx: Context): List<Store> {
         val query = term.trim()
         require(query.isNotEmpty()) { "Введи название магазина или категорию." }
-        val remote = photonSearch(query, lat, lon, 15)
+        require(!isRestrictedQuery(query)) { "Этот тип торговой точки недоступен для поиска." }
+        val remote = photonSearch(query, lat, lon, 15).filterNot { isRestrictedStore(it) }
         val local = custom(ctx, lat, lon).filter {
             it.name.contains(query, true) || it.address.contains(query, true) || query.equals("магазины", true)
         }
         return (remote + local)
+            .filterNot { isRestrictedStore(it) }
             .distinctBy { "${it.lat},${it.lon}" }
             .sortedBy { it.distance }
             .take(50)
@@ -31,7 +33,7 @@ object StoreRepository {
 
     fun suggest(term: String): List<Store> {
         val query = term.trim()
-        if (query.length < 2) return emptyList()
+        if (query.length < 2 || isRestrictedQuery(query)) return emptyList()
         // Подсказки не зависят от GPS: при помехах координаты могут быть неверными.
         return photonSearch(query, null, null, 7)
     }
@@ -64,7 +66,7 @@ object StoreRepository {
                 val code = connection.responseCode
                 if (code in 200..299) {
                     val body = connection.inputStream.bufferedReader().use { it.readText() }
-                    return parsePhotonResults(body, lat, lon)
+                    return parsePhotonResults(body, lat, lon).filterNot { isRestrictedStore(it) }
                 }
                 val errorBody = try {
                     connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
@@ -118,6 +120,40 @@ object StoreRepository {
             output.add(Store(itemName, address, itemLat, itemLon, itemDistance))
         }
         return output
+    }
+
+    /** Пеший маршрут от публичного OSM foot-router. Возвращает координаты линии маршрута. */
+    fun walkingRoute(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): List<Pair<Double, Double>> {
+        val url = "https://routing.openstreetmap.de/routed-foot/route/v1/driving/$fromLon,$fromLat;$toLon,$toLat?overview=full&geometries=geojson&steps=true"
+        val connection = (URL(url).openConnection() as HttpURLConnection)
+        connection.connectTimeout = 12000
+        connection.readTimeout = 20000
+        connection.setRequestProperty("User-Agent", USER_AGENT)
+        try {
+            if (connection.responseCode !in 200..299) throw Exception("Сервис пеших маршрутов временно недоступен.")
+            val root = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+            val routes = root.optJSONArray("routes") ?: JSONArray()
+            if (routes.length() == 0) throw Exception("Пешеходный маршрут не найден.")
+            val geometry = routes.getJSONObject(0).optJSONObject("geometry") ?: return emptyList()
+            val coordinates = geometry.optJSONArray("coordinates") ?: return emptyList()
+            return (0 until coordinates.length()).mapNotNull { i ->
+                val pair = coordinates.optJSONArray(i) ?: return@mapNotNull null
+                if (pair.length() < 2) return@mapNotNull null
+                val lon = pair.optDouble(0, Double.NaN)
+                val lat = pair.optDouble(1, Double.NaN)
+                if (lat.isFinite() && lon.isFinite()) lat to lon else null
+            }
+        } finally { connection.disconnect() }
+    }
+
+    private fun isRestrictedQuery(query: String): Boolean {
+        val q = query.lowercase().replace("ё", "е").replace(Regex("[^\\p{L}\\p{N}]"), "")
+        return listOf("красноебелое", "кб", "алкоголь", "алкомаркет", "винныймагазин", "liquorstore", "alcoholshop").any { q.contains(it) }
+    }
+
+    private fun isRestrictedStore(store: Store): Boolean {
+        val name = store.name.lowercase().replace("ё", "е")
+        return listOf("красное и белое", "красное белое", "алкомаркет", "алкогольный магазин").any { name.contains(it) }
     }
 
     fun geocode(address: String): Pair<Double, Double> {
