@@ -45,7 +45,18 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi(savedInstanceState)
-        if (hasLocationPermission()) locate() else requestLocationPermission()
+        val savedManual = getSharedPreferences("manual_location", MODE_PRIVATE)
+        val savedLat = savedManual.getString("lat", null)?.toDoubleOrNull()
+        val savedLon = savedManual.getString("lon", null)?.toDoubleOrNull()
+        if (savedLat != null && savedLon != null) {
+            val saved = Location("manual").apply {
+                latitude = savedLat
+                longitude = savedLon
+                accuracy = 0f
+                time = System.currentTimeMillis()
+            }
+            setCurrentLocation(saved, manual = true)
+        } else if (hasLocationPermission()) locate() else requestLocationPermission()
     }
 
     private fun buildUi(savedInstanceState: Bundle?) {
@@ -64,7 +75,7 @@ class MainActivity : Activity() {
             setTypeface(null, android.graphics.Typeface.BOLD)
         })
         content.addView(TextView(this).apply {
-            text = "Поиск магазинов на карте OpenStreetMap"
+            text = "Поиск магазинов · OpenStreetMap"
             textSize = 13f
             setTextColor(0xFFAAAAAA.toInt())
         })
@@ -95,10 +106,15 @@ class MainActivity : Activity() {
             setOnClickListener { searchStores() }
         }, LinearLayout.LayoutParams(0, dp(48), 1f))
         buttons.addView(Button(this).apply {
-            text = "Моё место"
+            text = "Моё место (GPS)"
             setOnClickListener { locate() }
         }, LinearLayout.LayoutParams(0, dp(48), 1f))
         content.addView(buttons)
+
+        content.addView(Button(this).apply {
+            text = "Указать моё место вручную"
+            setOnClickListener { showSetLocationDialog() }
+        })
 
         content.addView(Button(this).apply {
             text = "＋ Добавить магазин вручную"
@@ -149,7 +165,6 @@ class MainActivity : Activity() {
         if (query.length < 2) return
         val task = object : Runnable {
             override fun run() {
-                val location = currentLocation ?: return
                 val wait = (1200L - (System.currentTimeMillis() - lastSuggestionRequest)).coerceAtLeast(0L)
                 if (wait > 0L) {
                     handler.postDelayed(this, wait)
@@ -158,7 +173,7 @@ class MainActivity : Activity() {
                 lastSuggestionRequest = System.currentTimeMillis()
                 executor.execute {
                     try {
-                        val found = StoreRepository.suggest(location.latitude, location.longitude, query)
+                        val found = StoreRepository.suggest(query)
                         runOnUiThread {
                             if (input.text.toString().trim() != query) return@runOnUiThread
                             suggestions.removeAllViews()
@@ -170,7 +185,8 @@ class MainActivity : Activity() {
                                         input.setText(store.name)
                                         input.setSelection(input.text.length)
                                         suggestions.removeAllViews()
-                                        searchStores(store.name)
+                                        if (currentLocation != null) searchStores(store.name)
+                                        else info.text = "Название выбрано. Теперь укажи своё место вручную, чтобы найти ближайшие магазины."
                                     }
                                 }
                                 suggestions.addView(button)
@@ -189,8 +205,7 @@ class MainActivity : Activity() {
     private fun searchStores(forcedQuery: String? = null) {
         val location = currentLocation
         if (location == null) {
-            info.text = "Сначала получи актуальное местоположение — нажми «Моё место»."
-            locate()
+            info.text = "Сначала укажи своё место вручную или попробуй GPS."
             return
         }
         val query = (forcedQuery ?: input.text.toString()).trim()
@@ -325,6 +340,51 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun showSetLocationDialog() {
+        val addressInput = EditText(this).apply {
+            hint = "Город, улица и дом (например: Казань, Баумана, 10)"
+            setSingleLine(true)
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), 0, dp(18), 0)
+            addView(addressInput)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Где ты находишься?")
+            .setMessage("Введи город или адрес. Это заменит ошибочные GPS-координаты.")
+            .setView(container)
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Найти место") { _, _ ->
+                val address = addressInput.text.toString().trim()
+                if (address.isEmpty()) {
+                    info.text = "Введи хотя бы название города."
+                    return@setPositiveButton
+                }
+                info.text = "Определяем указанное место…"
+                executor.execute {
+                    try {
+                        val point = StoreRepository.geocode(address)
+                        val manual = Location("manual").apply {
+                            latitude = point.first
+                            longitude = point.second
+                            accuracy = 0f
+                            time = System.currentTimeMillis()
+                        }
+                        getSharedPreferences("manual_location", MODE_PRIVATE).edit()
+                            .putString("lat", point.first.toString())
+                            .putString("lon", point.second.toString())
+                            .putString("label", address)
+                            .apply()
+                        runOnUiThread { setCurrentLocation(manual, manual = true) }
+                    } catch (e: Exception) {
+                        runOnUiThread { info.text = e.message ?: "Не удалось найти это место. Уточни адрес." }
+                    }
+                }
+            }
+            .show()
+    }
+
     private fun locate() {
         if (!hasLocationPermission()) {
             requestLocationPermission()
@@ -341,7 +401,8 @@ class MainActivity : Activity() {
                         if (age > 120_000L || age < -30_000L) {
                             info.text = "Получены устаревшие координаты. Подожди немного и нажми «Моё место» ещё раз."
                         } else {
-                            setCurrentLocation(location)
+                            getSharedPreferences("manual_location", MODE_PRIVATE).edit().clear().apply()
+                            setCurrentLocation(location, manual = false)
                         }
                     }
                 }
@@ -351,11 +412,15 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun setCurrentLocation(location: Location) {
+    private fun setCurrentLocation(location: Location, manual: Boolean = false) {
         currentLocation = location
         selectedStore = null
         routeButton.isEnabled = false
-        info.text = "Местоположение обновлено. Введи название магазина."
+        info.text = if (manual) {
+            "Место задано вручную. GPS не используется. Введи название магазина."
+        } else {
+            "Координаты получены от телефона. Если точка неверная, задай место вручную."
+        }
         mapPage.show(location.latitude, location.longitude, emptyList())
     }
 

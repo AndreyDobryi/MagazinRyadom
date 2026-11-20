@@ -19,7 +19,7 @@ object StoreRepository {
     fun search(lat: Double, lon: Double, term: String, ctx: Context): List<Store> {
         val query = term.trim()
         require(query.isNotEmpty()) { "Введи название магазина или категорию." }
-        val remote = photonSearch(query, lat, lon, 30)
+        val remote = photonSearch(query, lat, lon, 15)
         val local = custom(ctx, lat, lon).filter {
             it.name.contains(query, true) || it.address.contains(query, true) || query.equals("магазины", true)
         }
@@ -29,53 +29,95 @@ object StoreRepository {
             .take(50)
     }
 
-    fun suggest(lat: Double, lon: Double, term: String): List<Store> {
+    fun suggest(term: String): List<Store> {
         val query = term.trim()
         if (query.length < 2) return emptyList()
-        return photonSearch(query, lat, lon, 7)
+        // Подсказки не зависят от GPS: при помехах координаты могут быть неверными.
+        return photonSearch(query, null, null, 7)
     }
 
-    private fun photonSearch(query: String, lat: Double, lon: Double, limit: Int): List<Store> {
+    private fun photonSearch(query: String, lat: Double?, lon: Double?, limit: Int): List<Store> {
         val encoded = URLEncoder.encode(query, "UTF-8")
-        val url = URL("${PHOTON}?q=${encoded}&lat=${lat}&lon=${lon}&limit=${limit}&lang=ru")
-        val connection = url.openConnection() as HttpURLConnection
-        connection.connectTimeout = 10000
-        connection.readTimeout = 15000
-        connection.setRequestProperty("User-Agent", USER_AGENT)
-        try {
-            val code = connection.responseCode
-            if (code !in 200..299) throw Exception("Сервис поиска временно недоступен (HTTP $code).")
-            val root = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
-            val features = root.optJSONArray("features") ?: JSONArray()
-            val output = mutableListOf<Store>()
-            for (index in 0 until features.length()) {
-                val feature = features.optJSONObject(index) ?: continue
-                val geometry = feature.optJSONObject("geometry") ?: continue
-                val coordinates = geometry.optJSONArray("coordinates") ?: continue
-                if (coordinates.length() < 2) continue
-                val properties = feature.optJSONObject("properties") ?: JSONObject()
-                val itemName = properties.optString("name").ifBlank {
-                    properties.optString("street").ifBlank { properties.optString("type").ifBlank { "Место" } }
-                }
-                val addressParts = listOf(
-                    properties.optString("street"),
-                    properties.optString("housenumber"),
-                    properties.optString("district"),
-                    properties.optString("city"),
-                    properties.optString("state")
-                ).filter { it.isNotBlank() }.distinct()
-                val address = addressParts.joinToString(", ").ifBlank {
-                    properties.optString("country").ifBlank { "Адрес не указан в OpenStreetMap" }
-                }
-                val itemLon = coordinates.optDouble(0, Double.NaN)
-                val itemLat = coordinates.optDouble(1, Double.NaN)
-                if (!itemLat.isFinite() || !itemLon.isFinite()) continue
-                output.add(Store(itemName, address, itemLat, itemLon, distance(lat, lon, itemLat, itemLon)))
-            }
-            return output
-        } finally {
-            connection.disconnect()
+        val safeLimit = limit.coerceIn(1, 15)
+
+        // Сначала ищем рядом с пользователем. Если публичный Photon отклоняет
+        // параметры географического смещения (HTTP 400), повторяем обычный поиск.
+        val urls = linkedSetOf<String>()
+        if (lat != null && lon != null && lat.isFinite() && lon.isFinite() &&
+            lat in -90.0..90.0 && lon in -180.0..180.0) {
+            urls += "${PHOTON}?q=${encoded}&lat=${lat}&lon=${lon}&limit=${safeLimit}&lang=ru"
         }
+        urls += "${PHOTON}?q=${encoded}&limit=${safeLimit}&lang=ru"
+        // Последние попытки — убираем необязательные параметры по одному.
+        urls += "${PHOTON}?q=${encoded}&limit=${safeLimit}"
+        urls += "${PHOTON}?q=${encoded}"
+
+        var lastBadRequest = ""
+        for (address in urls) {
+            val connection = (URL(address).openConnection() as HttpURLConnection)
+            connection.connectTimeout = 10000
+            connection.readTimeout = 15000
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("User-Agent", USER_AGENT)
+            connection.setRequestProperty("Accept", "application/geo+json, application/json")
+            try {
+                val code = connection.responseCode
+                if (code in 200..299) {
+                    val body = connection.inputStream.bufferedReader().use { it.readText() }
+                    return parsePhotonResults(body, lat, lon)
+                }
+                val errorBody = try {
+                    connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                } catch (_: Exception) { "" }
+                if (code == 400) {
+                    lastBadRequest = errorBody.take(240)
+                    continue
+                }
+                throw Exception("Сервис поиска временно недоступен (HTTP $code).")
+            } finally {
+                connection.disconnect()
+            }
+        }
+        val details = lastBadRequest.takeIf { it.isNotBlank() }
+        throw Exception(if (details != null) {
+            "Сервис поиска отклонил запрос (HTTP 400). Попробуй другое название."
+        } else {
+            "Сервис поиска временно недоступен (HTTP 400)."
+        })
+    }
+
+    private fun parsePhotonResults(body: String, lat: Double?, lon: Double?): List<Store> {
+        val root = JSONObject(body)
+        val features = root.optJSONArray("features") ?: JSONArray()
+        val output = mutableListOf<Store>()
+        for (index in 0 until features.length()) {
+            val feature = features.optJSONObject(index) ?: continue
+            val geometry = feature.optJSONObject("geometry") ?: continue
+            val coordinates = geometry.optJSONArray("coordinates") ?: continue
+            if (coordinates.length() < 2) continue
+            val properties = feature.optJSONObject("properties") ?: JSONObject()
+            val itemName = properties.optString("name").ifBlank {
+                properties.optString("street").ifBlank { properties.optString("type").ifBlank { "Место" } }
+            }
+            val addressParts = listOf(
+                properties.optString("street"),
+                properties.optString("housenumber"),
+                properties.optString("district"),
+                properties.optString("city"),
+                properties.optString("state")
+            ).filter { it.isNotBlank() }.distinct()
+            val address = addressParts.joinToString(", ").ifBlank {
+                properties.optString("country").ifBlank { "Адрес не указан в OpenStreetMap" }
+            }
+            val itemLon = coordinates.optDouble(0, Double.NaN)
+            val itemLat = coordinates.optDouble(1, Double.NaN)
+            if (!itemLat.isFinite() || !itemLon.isFinite()) continue
+            val itemDistance = if (lat != null && lon != null && lat.isFinite() && lon.isFinite()) {
+                distance(lat, lon, itemLat, itemLon)
+            } else 0.0
+            output.add(Store(itemName, address, itemLat, itemLon, itemDistance))
+        }
+        return output
     }
 
     fun geocode(address: String): Pair<Double, Double> {
