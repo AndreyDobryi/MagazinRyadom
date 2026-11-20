@@ -19,7 +19,6 @@ object StoreRepository {
     fun search(lat: Double, lon: Double, term: String, ctx: Context): List<Store> {
         val query = term.trim()
         require(query.isNotEmpty()) { "Введи название магазина или категорию." }
-        require(!isRestrictedQuery(query)) { "Этот тип торговой точки недоступен для поиска." }
         require(lat.isFinite() && lon.isFinite() && lat in -90.0..90.0 && lon in -180.0..180.0) {
             "Не удалось определить корректное местоположение. Обнови геолокацию и повтори поиск."
         }
@@ -35,7 +34,6 @@ object StoreRepository {
         }
 
         return (nearbyOsm + nearbyPhoton + local)
-            .filterNot { isRestrictedStore(it) }
             .distinctBy { "${it.lat},${it.lon}" }
             .sortedBy { it.distance }
             .take(50)
@@ -43,7 +41,7 @@ object StoreRepository {
 
     fun suggest(term: String): List<Store> {
         val query = term.trim()
-        if (query.length < 2 || isRestrictedQuery(query)) return emptyList()
+        if (query.length < 2) return emptyList()
         // Подсказки не зависят от GPS: при помехах координаты могут быть неверными.
         return photonSearch(query, null, null, 7)
     }
@@ -76,7 +74,7 @@ object StoreRepository {
                 val code = connection.responseCode
                 if (code in 200..299) {
                     val body = connection.inputStream.bufferedReader().use { it.readText() }
-                    return parsePhotonResults(body, lat, lon).filterNot { isRestrictedStore(it) }
+                    return parsePhotonResults(body, lat, lon)
                 }
                 val errorBody = try {
                     connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
@@ -98,17 +96,25 @@ object StoreRepository {
         })
     }
 
-
-    /** Ищет совпадения по имени среди объектов OpenStreetMap в заданном радиусе. */
-    private fun overpassSearch(query: String, lat: Double, lon: Double, radiusMeters: Int): List<Store> {
-        val escaped = query.trim()
+    private fun buildOverpassNameRegex(query: String): String {
+        val cleaned = query.trim().lowercase().replace('ё', 'е')
+        val compact = cleaned.replace(Regex("[^\\p{L}\\p{N}]"), "")
+        if (compact == "красноебелое" || (cleaned.contains("красн") && cleaned.contains("бел"))) {
+            return "красн.{0,12}бел"
+        }
+        return query.trim()
             .replace("\\", "\\\\")
             .replace("\"", "\\\"")
             .replace("[", "\\[")
             .replace("]", "\\]")
+    }
+
+    /** Ищет совпадения по имени среди объектов OpenStreetMap в заданном радиусе. */
+    private fun overpassSearch(query: String, lat: Double, lon: Double, radiusMeters: Int): List<Store> {
+        val regexPattern = buildOverpassNameRegex(query)
         val overpassQuery = """
             [out:json][timeout:20];
-            (nwr(around:$radiusMeters,$lat,$lon)["name"~"$escaped",i];);
+            (nwr(around:$radiusMeters,$lat,$lon)["name"~"$regexPattern",i];);
             out center tags;
         """.trimIndent()
         val connection = (URL("https://overpass-api.de/api/interpreter").openConnection() as HttpURLConnection)
@@ -202,16 +208,6 @@ object StoreRepository {
                 if (lat.isFinite() && lon.isFinite()) lat to lon else null
             }
         } finally { connection.disconnect() }
-    }
-
-    private fun isRestrictedQuery(query: String): Boolean {
-        val q = query.lowercase().replace("ё", "е").replace(Regex("[^\\p{L}\\p{N}]"), "")
-        return listOf("красноебелое", "кб", "алкоголь", "алкомаркет", "винныймагазин", "liquorstore", "alcoholshop").any { q.contains(it) }
-    }
-
-    private fun isRestrictedStore(store: Store): Boolean {
-        val name = store.name.lowercase().replace("ё", "е")
-        return listOf("красное и белое", "красное белое", "алкомаркет", "алкогольный магазин").any { name.contains(it) }
     }
 
     fun geocode(address: String): Pair<Double, Double> {
