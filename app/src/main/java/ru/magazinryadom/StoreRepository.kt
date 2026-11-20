@@ -14,17 +14,27 @@ import kotlin.math.sqrt
 
 object StoreRepository {
     private const val PHOTON = "https://photon.komoot.io/api/"
-    private const val USER_AGENT = "MagazinRyadom/1.4 (Android)"
+    private const val USER_AGENT = "MagazinRyadom/1.5.1 (Android)"
 
     fun search(lat: Double, lon: Double, term: String, ctx: Context): List<Store> {
         val query = term.trim()
         require(query.isNotEmpty()) { "Введи название магазина или категорию." }
         require(!isRestrictedQuery(query)) { "Этот тип торговой точки недоступен для поиска." }
-        val remote = photonSearch(query, lat, lon, 15).filterNot { isRestrictedStore(it) }
-        val local = custom(ctx, lat, lon).filter {
-            it.name.contains(query, true) || it.address.contains(query, true) || query.equals("магазины", true)
+        require(lat.isFinite() && lon.isFinite() && lat in -90.0..90.0 && lon in -180.0..180.0) {
+            "Не удалось определить корректное местоположение. Обнови геолокацию и повтори поиск."
         }
-        return (remote + local)
+
+        // В первую очередь запрашиваем реальные объекты OSM в радиусе 5 км.
+        // Это не позволяет глобальной выдаче Photon подменить ближайшую точку магазином за несколько километров.
+        val nearbyOsm = try { overpassSearch(query, lat, lon, 5000) } catch (_: Exception) { emptyList() }
+        val nearbyPhoton = if (nearbyOsm.isEmpty()) {
+            photonSearch(query, lat, lon, 50).filter { it.distance <= 5000.0 }
+        } else emptyList()
+        val local = custom(ctx, lat, lon).filter {
+            (it.name.contains(query, true) || it.address.contains(query, true) || query.equals("магазины", true)) && it.distance <= 5000.0
+        }
+
+        return (nearbyOsm + nearbyPhoton + local)
             .filterNot { isRestrictedStore(it) }
             .distinctBy { "${it.lat},${it.lon}" }
             .sortedBy { it.distance }
@@ -40,7 +50,7 @@ object StoreRepository {
 
     private fun photonSearch(query: String, lat: Double?, lon: Double?, limit: Int): List<Store> {
         val encoded = URLEncoder.encode(query, "UTF-8")
-        val safeLimit = limit.coerceIn(1, 15)
+        val safeLimit = limit.coerceIn(1, 50)
 
         // Сначала ищем рядом с пользователем. Если публичный Photon отклоняет
         // параметры географического смещения (HTTP 400), повторяем обычный поиск.
@@ -86,6 +96,54 @@ object StoreRepository {
         } else {
             "Сервис поиска временно недоступен (HTTP 400)."
         })
+    }
+
+
+    /** Ищет совпадения по имени среди объектов OpenStreetMap в заданном радиусе. */
+    private fun overpassSearch(query: String, lat: Double, lon: Double, radiusMeters: Int): List<Store> {
+        val escaped = query.trim()
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+        val overpassQuery = """
+            [out:json][timeout:20];
+            (nwr(around:$radiusMeters,$lat,$lon)["name"~"$escaped",i];);
+            out center tags;
+        """.trimIndent()
+        val connection = (URL("https://overpass-api.de/api/interpreter").openConnection() as HttpURLConnection)
+        connection.connectTimeout = 10000
+        connection.readTimeout = 25000
+        connection.requestMethod = "POST"
+        connection.doOutput = true
+        connection.setRequestProperty("User-Agent", USER_AGENT)
+        connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+        try {
+            val payload = "data=" + URLEncoder.encode(overpassQuery, "UTF-8")
+            connection.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+            if (connection.responseCode !in 200..299) throw Exception("OpenStreetMap search unavailable")
+            val root = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+            val elements = root.optJSONArray("elements") ?: JSONArray()
+            val found = mutableListOf<Store>()
+            for (i in 0 until elements.length()) {
+                val element = elements.optJSONObject(i) ?: continue
+                val tags = element.optJSONObject("tags") ?: continue
+                val name = tags.optString("name").takeIf { it.isNotBlank() } ?: continue
+                val center = element.optJSONObject("center")
+                val itemLat = if (center != null) center.optDouble("lat", Double.NaN) else element.optDouble("lat", Double.NaN)
+                val itemLon = if (center != null) center.optDouble("lon", Double.NaN) else element.optDouble("lon", Double.NaN)
+                if (!itemLat.isFinite() || !itemLon.isFinite()) continue
+                val address = listOf(
+                    tags.optString("addr:street"), tags.optString("addr:housenumber"),
+                    tags.optString("addr:city")
+                ).filter { it.isNotBlank() }.joinToString(", ").ifBlank { "Адрес не указан в OpenStreetMap" }
+                val distanceMeters = distance(lat, lon, itemLat, itemLon)
+                if (distanceMeters <= radiusMeters) found.add(Store(name, address, itemLat, itemLon, distanceMeters))
+            }
+            return found
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun parsePhotonResults(body: String, lat: Double?, lon: Double?): List<Store> {
