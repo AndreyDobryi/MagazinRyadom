@@ -32,7 +32,7 @@ import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
-    private val executor = Executors.newSingleThreadExecutor()
+    private val executor = Executors.newFixedThreadPool(3)
     private val handler = Handler(Looper.getMainLooper())
     private val locationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
     private lateinit var input: EditText
@@ -49,6 +49,7 @@ class MainActivity : Activity() {
     private var lastNetworkLocation: Location? = null
     private var suggestionTask: Runnable? = null
     private var lastSuggestionRequest = 0L
+    private var searchGeneration = 0
     private var manualLocationMode = false
     private var lastRouteLocation: Location? = null
     private var lastRouteRefreshAt = 0L
@@ -108,88 +109,163 @@ class MainActivity : Activity() {
     }
 
     private fun buildUi(savedInstanceState: Bundle?) {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(10))
-            setBackgroundColor(0xFF0D0F12.toInt())
-        }
-        val scroll = ScrollView(this).apply { clipToPadding = false }
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, dp(14))
-        }
+        window.statusBarColor = 0xFF101318.toInt()
+        window.navigationBarColor = 0xFF101318.toInt()
+        val root = android.widget.FrameLayout(this).apply { setBackgroundColor(0xFF101318.toInt()) }
 
-        content.addView(TextView(this).apply {
-            text = "МАГАЗИН РЯДОМ"
-            textSize = 11f
-            letterSpacing = 0.16f
-            setTextColor(0xFFD6B45A.toInt())
+        mapPage = MapPage(this, savedInstanceState)
+        mapPage.view.layoutParams = android.widget.FrameLayout.LayoutParams(-1, -1)
+        root.addView(mapPage.view)
+
+        val topPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = rounded(0xF0191D23.toInt(), 22)
+            elevation = dp(10).toFloat()
+        }
+        val brandRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        brandRow.addView(TextView(this).apply {
+            text = "М"
+            textSize = 20f
+            gravity = android.view.Gravity.CENTER
+            setTextColor(0xFF151515.toInt())
             setTypeface(null, android.graphics.Typeface.BOLD)
-        })
-        content.addView(TextView(this).apply {
-            text = "Найди ближайший магазин"
-            textSize = 27f
+            background = rounded(0xFFD6B45A.toInt(), 12)
+        }, LinearLayout.LayoutParams(dp(38), dp(38)))
+        val brandText = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), 0, 0, 0)
+        }
+        brandText.addView(TextView(this).apply {
+            text = "Магазин рядом"
+            textSize = 18f
             setTextColor(0xFFF7F7F7.toInt())
             setTypeface(null, android.graphics.Typeface.BOLD)
-            setPadding(0, dp(3), 0, 0)
         })
-        content.addView(TextView(this).apply {
-            text = "Выбери сеть ниже или введи название. Ближайший филиал появится на карте."
-            textSize = 13f
+        brandText.addView(TextView(this).apply {
+            text = "Найди ближайший филиал"
+            textSize = 11f
             setTextColor(0xFF9298A3.toInt())
-            setPadding(0, 0, 0, dp(14))
         })
+        brandRow.addView(brandText, LinearLayout.LayoutParams(0, -2, 1f))
+        brandRow.addView(TextView(this).apply {
+            text = "● GPS"
+            textSize = 11f
+            setTextColor(0xFF8ED5A6.toInt())
+            setPadding(dp(9), dp(6), dp(9), dp(6))
+            background = rounded(0xFF203329.toInt(), 20)
+        })
+        topPanel.addView(brandRow)
 
-        val searchPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            background = rounded(0xFF191D23.toInt(), 18)
+        val searchRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dp(10), 0, dp(5), 0)
+            background = rounded(0xFF292F38.toInt(), 14)
         }
         input = EditText(this).apply {
-            hint = "Например: Пятёрочка, Магнит, Перекрёсток"
+            hint = "Пятёрочка, Магнит, Дикси…"
             setTextColor(0xFFF4F4F4.toInt())
-            setHintTextColor(0xFF7D8490.toInt())
+            setHintTextColor(0xFF9298A3.toInt())
             setSingleLine(true)
-            textSize = 16f
-            setPadding(dp(6), dp(9), dp(6), dp(9))
+            textSize = 15f
+            setPadding(dp(4), dp(10), dp(4), dp(10))
             background = null
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH ||
+                    actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                    searchStores()
+                    true
+                } else false
+            }
         }
+        searchRow.addView(input, LinearLayout.LayoutParams(0, dp(48), 1f))
+        val findButton = Button(this).apply {
+            text = "Найти"
+            isAllCaps = false
+            textSize = 13f
+            setTextColor(0xFF171717.toInt())
+            background = rounded(0xFFD6B45A.toInt(), 11)
+            minHeight = dp(40)
+            setPadding(dp(12), 0, dp(12), 0)
+            setOnClickListener { searchStores() }
+        }
+        searchRow.addView(findButton, LinearLayout.LayoutParams(-2, dp(40)))
+        topPanel.addView(searchRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+
+        suggestions = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, dp(2))
+        }
+        topPanel.addView(suggestions)
+
         val quickScroll = android.widget.HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             clipToPadding = false
+            setPadding(0, dp(10), 0, 0)
         }
         val quickRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf(
-            "Пятёрочка", "Магнит", "Перекрёсток", "Дикси", "Лента", "ВкусВилл",
-            "Чижик", "Верный", "Монетка", "Светофор", "Ашан", "METRO",
-            "Спортмастер", "Детский мир", "Fix Price", "DNS", "М.Видео",
-            "Эльдорадо", "Золотое Яблоко", "Подружка", "Лемана ПРО", "OBI",
-            "Петрович", "Максидом", "Самокат", "Яндекс Лавка", "Аптека"
-        ).forEach { network ->
+        listOf("Пятёрочка", "Магнит", "Перекрёсток", "Дикси", "Лента", "ВкусВилл", "Чижик", "Fix Price", "Аптека").forEach { network ->
             val chip = Button(this).apply {
                 text = network
                 isAllCaps = false
-                textSize = 12f
-                minHeight = dp(38)
+                textSize = 11f
+                minHeight = dp(34)
                 setPadding(dp(10), 0, dp(10), 0)
                 setTextColor(0xFFE9D49A.toInt())
-                background = rounded(0xFF29251B.toInt(), 18)
+                background = rounded(0xFF302B20.toInt(), 18)
                 setOnClickListener {
                     input.setText(network)
                     input.setSelection(input.text.length)
                     searchStores(network)
                 }
             }
-            quickRow.addView(chip, LinearLayout.LayoutParams(-2, dp(38)).apply { marginEnd = dp(6) })
+            quickRow.addView(chip, LinearLayout.LayoutParams(-2, dp(34)).apply { marginEnd = dp(6) })
         }
         quickScroll.addView(quickRow)
-        searchPanel.addView(quickScroll)
-        searchPanel.addView(input)
-        suggestions = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, dp(4))
+        topPanel.addView(quickScroll)
+
+        val utilityRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, 0)
         }
-        searchPanel.addView(suggestions)
+        val manualButton = Button(this).apply {
+            text = "Задать место"
+            isAllCaps = false
+            textSize = 11f
+            minHeight = dp(36)
+            setTextColor(0xFFD8DEE8.toInt())
+            background = rounded(0xFF303640.toInt(), 10)
+            setOnClickListener { showSetLocationDialog() }
+        }
+        val addButton = Button(this).apply {
+            text = "+ Добавить точку"
+            isAllCaps = false
+            textSize = 11f
+            minHeight = dp(36)
+            setTextColor(0xFFD8DEE8.toInt())
+            background = rounded(0xFF303640.toInt(), 10)
+            setOnClickListener { showAddDialog() }
+        }
+        val gpsButton = Button(this).apply {
+            text = "◎ GPS"
+            isAllCaps = false
+            textSize = 11f
+            minHeight = dp(36)
+            setTextColor(0xFF171717.toInt())
+            background = rounded(0xFFD6B45A.toInt(), 10)
+            setOnClickListener { locate() }
+        }
+        utilityRow.addView(manualButton, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(4) })
+        utilityRow.addView(addButton, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(4); marginEnd = dp(4) })
+        utilityRow.addView(gpsButton, LinearLayout.LayoutParams(0, dp(36), 0.7f).apply { marginStart = dp(4) })
+        topPanel.addView(utilityRow)
+
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -197,111 +273,79 @@ class MainActivity : Activity() {
             }
             override fun afterTextChanged(s: Editable?) = Unit
         })
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val findButton = Button(this).apply {
-            text = "Найти рядом"
-            isAllCaps = false
-            setTextColor(0xFF171717.toInt())
-            background = rounded(0xFFD6B45A.toInt(), 12)
-            setOnClickListener { searchStores() }
-        }
-        actions.addView(findButton, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(6) })
-        val gpsButton = Button(this).apply {
-            text = "Обновить GPS"
-            isAllCaps = false
-            setTextColor(0xFFE8EAF0.toInt())
-            background = rounded(0xFF303640.toInt(), 12)
-            setOnClickListener { locate() }
-        }
-        actions.addView(gpsButton, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(6) })
-        searchPanel.addView(actions)
-        content.addView(searchPanel)
 
-        val utilityRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(8), 0, dp(8))
+        root.addView(topPanel, android.widget.FrameLayout.LayoutParams(-1, -2, android.view.Gravity.TOP).apply {
+            setMargins(dp(12), dp(10), dp(12), 0)
+        })
+
+        val bottomScroll = ScrollView(this).apply {
+            isFillViewport = false
+            clipToPadding = false
+            background = rounded(0xF0191D23.toInt(), 22)
+            elevation = dp(12).toFloat()
+            setPadding(0, 0, 0, dp(4))
         }
-        utilityRow.addView(Button(this).apply {
-            text = "Моё место вручную"
-            isAllCaps = false
+        val bottomContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(15), dp(13), dp(15), dp(14))
+        }
+        bottomContent.addView(TextView(this).apply {
+            text = "━━━━"
             textSize = 12f
-            setOnClickListener { showSetLocationDialog() }
-        }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(4) })
-        utilityRow.addView(Button(this).apply {
-            text = "+ Добавить точку"
-            isAllCaps = false
-            textSize = 12f
-            setOnClickListener { showAddDialog() }
-        }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(4) })
-        content.addView(utilityRow)
+            gravity = android.view.Gravity.CENTER
+            setTextColor(0xFF68717D.toInt())
+        })
+        val sheetHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(5))
+        }
+        sheetHeader.addView(TextView(this).apply {
+            text = "Рядом с тобой"
+            textSize = 18f
+            setTextColor(0xFFF7F7F7.toInt())
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        sheetHeader.addView(TextView(this).apply {
+            text = "OPENSTREETMAP"
+            textSize = 9f
+            letterSpacing = 0.08f
+            setTextColor(0xFFD6B45A.toInt())
+            setPadding(dp(8), dp(5), dp(8), dp(5))
+            background = rounded(0xFF302B20.toInt(), 16)
+        })
+        bottomContent.addView(sheetHeader)
 
         info = TextView(this).apply {
             text = "Определяем местоположение…"
-            textSize = 13f
+            textSize = 12f
             setTextColor(0xFFD6B45A.toInt())
-            setPadding(dp(4), dp(5), dp(4), dp(10))
+            setPadding(0, dp(2), 0, dp(8))
         }
-        content.addView(info)
-
-        val mapCard = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(5), dp(5), dp(5), dp(5))
-            background = rounded(0xFF191D23.toInt(), 18)
-        }
-        mapPage = MapPage(this, savedInstanceState)
-        mapCard.addView(mapPage.view)
-        content.addView(mapCard)
-        content.addView(TextView(this).apply {
-            text = "СИНЯЯ ТОЧКА — ТЫ · ЗОЛОТАЯ — МАГАЗИН · ЗЕЛЁНАЯ ЛИНИЯ — ПЕШИЙ МАРШРУТ"
-            textSize = 10f
-            letterSpacing = 0.12f
-            setTextColor(0xFF9298A3.toInt())
-            setPadding(dp(5), dp(7), 0, dp(8))
-        })
-
-        val resultsHeader = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            setPadding(dp(2), dp(7), dp(2), dp(8))
-        }
-        resultsHeader.addView(TextView(this).apply {
-            text = "Ближайшие филиалы сети"
-            textSize = 19f
-            setTextColor(0xFFF4F4F4.toInt())
-            setTypeface(null, android.graphics.Typeface.BOLD)
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        resultsHeader.addView(TextView(this).apply {
-            text = "ПОИСК ПО СЕТИ"
-            textSize = 11f
-            setTextColor(0xFFD6B45A.toInt())
-            setPadding(dp(9), dp(5), dp(9), dp(5))
-            background = rounded(0xFF29251B.toInt(), 20)
-        })
-        content.addView(resultsHeader)
+        bottomContent.addView(info)
         results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        content.addView(results)
+        bottomContent.addView(results)
 
         routeButton = Button(this).apply {
             text = "Открыть маршрут в навигаторе"
             isEnabled = false
             isAllCaps = false
+            textSize = 14f
             setTextColor(0xFF171717.toInt())
-            background = rounded(0xFFD6B45A.toInt(), 14)
+            background = rounded(0xFFD6B45A.toInt(), 13)
             setOnClickListener { openWalkingRoute() }
         }
-        content.addView(routeButton, LinearLayout.LayoutParams(-1, dp(50)).apply {
-            topMargin = dp(8)
-            bottomMargin = dp(8)
-        })
-        content.addView(TextView(this).apply {
-            text = "Карта и данные: © OpenStreetMap contributors. GPS обновляется, пока приложение открыто."
+        bottomContent.addView(routeButton, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(7) })
+        bottomContent.addView(TextView(this).apply {
+            text = "Синяя точка — ты · золотая — магазин · зелёная линия — пеший путь"
             textSize = 10f
-            setTextColor(0xFF777E89.toInt())
-            setPadding(dp(3), dp(4), dp(3), 0)
+            setTextColor(0xFF9298A3.toInt())
+            setPadding(0, dp(8), 0, 0)
         })
-
-        scroll.addView(content)
-        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        bottomScroll.addView(bottomContent)
+        root.addView(bottomScroll, android.widget.FrameLayout.LayoutParams(-1, dp(300), android.view.Gravity.BOTTOM).apply {
+            setMargins(dp(12), 0, dp(12), dp(10))
+        })
         setContentView(root)
     }
 
@@ -382,6 +426,7 @@ class MainActivity : Activity() {
             info.text = "Поиск этой сети недоступен. Можно выбрать другую сеть или обычную категорию магазинов."
             return
         }
+        val requestId = ++searchGeneration
         selectedNetwork = query
         selectedStore = null
         routeButton.isEnabled = false
@@ -407,6 +452,7 @@ class MainActivity : Activity() {
                     .map { it.copy(distance = StoreRepository.distance(location.latitude, location.longitude, it.lat, it.lon)) }
                     .sortedBy { it.distance }
                 runOnUiThread {
+                    if (requestId != searchGeneration) return@runOnUiThread
                     results.removeAllViews()
                     if (nearestFirst.isEmpty()) {
                         info.text = "В радиусе 3 км филиалы «$query» не найдены. Попробуй другое написание или обнови GPS."
@@ -420,6 +466,7 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 runOnUiThread {
+                    if (requestId != searchGeneration) return@runOnUiThread
                     results.removeAllViews()
                     info.text = e.message ?: "Поиск временно недоступен. Попробуй ещё раз."
                     results.addView(TextView(this).apply {
@@ -468,7 +515,7 @@ class MainActivity : Activity() {
         selectedStore = store
         if (!network.isNullOrBlank()) selectedNetwork = network
         routeButton.isEnabled = true
-        info.text = "Сохраняем выбранный магазин…"
+        info.text = "Магазин найден. Быстро строим пеший маршрут…"
         executor.execute {
             var routeFailure: String? = null
             val walkingPath = try {
