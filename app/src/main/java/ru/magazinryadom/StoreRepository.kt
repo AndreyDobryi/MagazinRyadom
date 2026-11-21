@@ -93,10 +93,19 @@ object StoreRepository {
             emptyList()
         }
 
-        // Резервный поиск по POI через Nominatim нужен только если Overpass
-        // вернул пусто или временно недоступен.
+        // Дополняем OSM-выдачу геокодером Photon: иногда в Overpass отсутствует
+        // ближайший филиал, хотя более дальний уже размечен. Оставляем только
+        // результаты, совпадающие с запросом и попадающие в радиус поиска.
+        val photonResults = runCatching {
+            photonSearch(query, lat, lon, MAX_RESULTS)
+        }.getOrDefault(emptyList())
+            .filter { it.distance.isFinite() && it.distance <= SEARCH_RADIUS }
+            .filter { matchesQuery(it, query) }
+            .filterNot { isRestrictedStore(it) }
+
+        // Nominatim остаётся последним резервом, если оба основных источника пусты.
         var nominatimError: String? = null
-        val fallbackResults = if (osmResults.isEmpty()) {
+        val fallbackResults = if (osmResults.isEmpty() && photonResults.isEmpty()) {
             try {
                 nominatimSearch(query, lat, lon)
             } catch (e: Exception) {
@@ -105,7 +114,7 @@ object StoreRepository {
             }
         } else emptyList()
 
-        val combined = (osmResults + fallbackResults + local)
+        val combined = (osmResults + photonResults + fallbackResults + local)
             .filter { it.distance.isFinite() && it.distance <= SEARCH_RADIUS }
             .filterNot { isRestrictedStore(it) }
             .distinctBy {
