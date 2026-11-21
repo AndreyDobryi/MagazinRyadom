@@ -58,37 +58,53 @@ object MapTile {
             try {
                 val appContext = context.applicationContext
                 MapLibre.getInstance(appContext)
-                val options = MapSnapshotter.Options(WIDTH, HEIGHT)
-                    .withStyleBuilder(Style.Builder().fromUri(STYLE_URL))
-                    .withCameraPosition(
-                        CameraPosition.Builder()
-                            .target(LatLng(userLat, userLon))
-                            .zoom(zoom)
-                            .build()
-                    )
-                    .withLogo(false)
-                    .withAttribution(false)
-
-                val snapshotter = MapSnapshotter(appContext, options)
-                snapshotterRef.set(snapshotter)
-                snapshotter.start(
-                    { snapshot ->
-                        try {
-                            val bitmap = snapshot.bitmap.copy(Bitmap.Config.ARGB_8888, true)
-                            drawRouteAndMarkers(
-                                snapshot, bitmap, userLat, userLon, storeLat, storeLon, route
-                            )
-                            result.set(bitmap)
-                        } catch (_: Exception) {
-                            result.set(null)
-                        } finally {
-                            latch.countDown()
-                        }
-                    },
-                    {
-                        latch.countDown()
-                    }
+                val styleUrls = listOf(
+                    STYLE_URL,
+                    "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
                 )
+                fun startStyleAttempt(index: Int) {
+                    if (index >= styleUrls.size) {
+                        latch.countDown()
+                        return
+                    }
+                    try {
+                        val options = MapSnapshotter.Options(WIDTH, HEIGHT)
+                            .withStyleBuilder(Style.Builder().fromUri(styleUrls[index]))
+                            .withCameraPosition(
+                                CameraPosition.Builder()
+                                    .target(LatLng(userLat, userLon))
+                                    .zoom(zoom)
+                                    .build()
+                            )
+                            .withLogo(false)
+                            .withAttribution(false)
+                        val snapshotter = MapSnapshotter(appContext, options)
+                        snapshotterRef.set(snapshotter)
+                        snapshotter.start(
+                            { snapshot ->
+                                try {
+                                    val bitmap = snapshot.bitmap.copy(Bitmap.Config.ARGB_8888, true)
+                                    drawRouteAndMarkers(
+                                        snapshot, bitmap, userLat, userLon, storeLat, storeLon, route
+                                    )
+                                    result.set(bitmap)
+                                    latch.countDown()
+                                } catch (_: Exception) {
+                                    if (index + 1 < styleUrls.size) startStyleAttempt(index + 1)
+                                    else latch.countDown()
+                                }
+                            },
+                            {
+                                if (index + 1 < styleUrls.size) startStyleAttempt(index + 1)
+                                else latch.countDown()
+                            }
+                        )
+                    } catch (_: Exception) {
+                        if (index + 1 < styleUrls.size) startStyleAttempt(index + 1)
+                        else latch.countDown()
+                    }
+                }
+                startStyleAttempt(0)
             } catch (_: Exception) {
                 latch.countDown()
             }
