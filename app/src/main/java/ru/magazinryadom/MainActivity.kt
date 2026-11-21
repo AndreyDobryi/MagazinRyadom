@@ -159,7 +159,13 @@ class MainActivity : Activity() {
             clipToPadding = false
         }
         val quickRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf("Пятёрочка", "Магнит", "Перекрёсток", "Дикси", "Лента", "ВкусВилл", "Чижик", "Верный", "Монетка", "Светофор", "Ашан", "METRO", "Аптека").forEach { network ->
+        listOf(
+            "Пятёрочка", "Магнит", "Перекрёсток", "Дикси", "Лента", "ВкусВилл",
+            "Чижик", "Верный", "Монетка", "Светофор", "Ашан", "METRO",
+            "Спортмастер", "Детский мир", "Fix Price", "DNS", "М.Видео",
+            "Эльдорадо", "Золотое Яблоко", "Подружка", "Лемана ПРО", "OBI",
+            "Петрович", "Максидом", "Самокат", "Яндекс Лавка", "Аптека"
+        ).forEach { network ->
             val chip = Button(this).apply {
                 text = network
                 isAllCaps = false
@@ -328,8 +334,13 @@ class MainActivity : Activity() {
 
         // Suggestions are network names, not individual geocoded branches.
         val networks = listOf(
-            "Пятёрочка", "Магнит", "Перекрёсток", "Дикси", "Лента",
-            "Ашан", "ВкусВилл", "Чижик", "Верный", "Монетка", "Светофор", "METRO", "Супермаркет", "Аптека"
+            "Пятёрочка", "Магнит", "Магнит Косметик", "Магнит Аптека", "Перекрёсток",
+            "Дикси", "Лента", "Ашан", "ВкусВилл", "Чижик", "Верный", "Монетка",
+            "Светофор", "О'КЕЙ", "METRO", "Самокат", "Спортмастер", "Детский мир",
+            "Fix Price", "DNS", "М.Видео", "Эльдорадо", "Золотое Яблоко", "Подружка",
+            "Лемана ПРО", "OBI", "Петрович", "Максидом", "Касторама", "Яндекс Лавка",
+            "Вкусно и точка", "Бургер Кинг", "Rostic's", "Теремок", "Горздрав", "Ригла",
+            "36,6", "Супермаркет", "Аптека"
         )
         fun key(value: String) = value.lowercase(Locale.ROOT).replace('ё', 'е').replace(Regex("\\s+"), " ").trim()
         val normalizedQuery = key(query)
@@ -388,16 +399,20 @@ class MainActivity : Activity() {
         executor.execute {
             try {
                 val found = StoreRepository.search(location.latitude, location.longitude, query, this)
+                // Final local ranking is recalculated against the exact location captured for this search.
+                val nearestFirst = found
+                    .map { it.copy(distance = StoreRepository.distance(location.latitude, location.longitude, it.lat, it.lon)) }
+                    .sortedBy { it.distance }
                 runOnUiThread {
                     results.removeAllViews()
-                    if (found.isEmpty()) {
+                    if (nearestFirst.isEmpty()) {
                         info.text = "В радиусе 12 км филиалы «$query» не найдены. Попробуй другое написание или обнови GPS."
                         mapPage.show(location.latitude, location.longitude, emptyList())
                     } else {
-                        info.text = "Найдено филиалов: ${found.size}. Выбран ближайший — ${found.first().name}. На экране показаны ближайшие 10."
-                        found.take(10).forEach { addStoreCard(it) }
-                        mapPage.show(location.latitude, location.longitude, found.take(10))
-                        chooseStore(found.first(), query)
+                        info.text = "Найдено филиалов: ${nearestFirst.size}. Выбран ближайший — ${nearestFirst.first().name} (${formatDistance(nearestFirst.first().distance)} от тебя). На экране показаны ближайшие 10."
+                        nearestFirst.take(10).forEach { addStoreCard(it) }
+                        mapPage.show(location.latitude, location.longitude, nearestFirst.take(10))
+                        chooseStore(nearestFirst.first(), query)
                     }
                 }
             } catch (e: Exception) {
