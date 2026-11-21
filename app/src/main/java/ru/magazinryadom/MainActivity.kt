@@ -391,7 +391,7 @@ class MainActivity : Activity() {
             .apply()
         StoreWidget.update(this)
         suggestions.removeAllViews()
-        info.text = "Ищем филиалы сети «$query» в радиусе 12 км…"
+        info.text = "Ищем филиалы сети «$query» в радиусе 3 км…"
         results.removeAllViews()
         results.addView(TextView(this).apply {
             text = "Ищем филиалы по бренду и названию. Это может занять несколько секунд."
@@ -409,7 +409,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     results.removeAllViews()
                     if (nearestFirst.isEmpty()) {
-                        info.text = "В радиусе 12 км филиалы «$query» не найдены. Попробуй другое написание или обнови GPS."
+                        info.text = "В радиусе 3 км филиалы «$query» не найдены. Попробуй другое написание или обнови GPS."
                         mapPage.show(location.latitude, location.longitude, emptyList())
                     } else {
                         info.text = "Найдено филиалов: ${nearestFirst.size}. Выбран ближайший — ${nearestFirst.first().name} (${formatDistance(nearestFirst.first().distance)} от тебя). На экране показаны ближайшие 10."
