@@ -7,6 +7,10 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorCompletionService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.asin
 import kotlin.math.cos
 import kotlin.math.pow
@@ -19,6 +23,9 @@ object StoreRepository {
     private const val USER_AGENT = "MagazinRyadom/1.8.4 (Android; OpenStreetMap client)"
     private const val SEARCH_RADIUS = 3000.0
     private const val MAX_RESULTS = 100
+    private data class SearchCache(val query: String, val lat: Double, val lon: Double, val savedAt: Long, val stores: List<Store>)
+    @Volatile private var memoryCache: SearchCache? = null
+    private val overpassExecutor = Executors.newFixedThreadPool(3)
     // Prefer the VK Maps / Mail.ru public Overpass instance, which explicitly
     // welcomes app usage. Keep other instances as sequential fallbacks only.
     private val overpassEndpoints = listOf(
@@ -124,12 +131,21 @@ object StoreRepository {
             "Местоположение не определено. Обнови GPS или задай точку вручную."
         }
 
-        // Пользовательские точки остаются дополнительным источником, но не заменяют поиск филиалов сети.
+        val now = System.currentTimeMillis()
+        val cached = memoryCache
+        if (cached != null && cached.query == normalize(query) &&
+            now - cached.savedAt < 5 * 60 * 1000L &&
+            distance(cached.lat, cached.lon, lat, lon) < 120.0
+        ) {
+            return cached.stores
+                .map { it.copy(distance = distance(lat, lon, it.lat, it.lon)) }
+                .filter { it.distance <= SEARCH_RADIUS }
+                .sortedBy { it.distance }
+        }
+
         val local = custom(ctx, lat, lon)
             .filter { matchesQuery(it, query) && it.distance <= SEARCH_RADIUS }
 
-        // Overpass — основной источник именно объектов OSM. Photon не используем
-        // как каталог филиалов: это геокодер, его выдача может быть неполной.
         var osmResponded = false
         var osmError: String? = null
         val osmResults = try {
@@ -139,17 +155,15 @@ object StoreRepository {
             emptyList()
         }
 
-        // Дополняем OSM-выдачу геокодером Photon: иногда в Overpass отсутствует
-        // ближайший филиал, хотя более дальний уже размечен. Оставляем только
-        // результаты, совпадающие с запросом и попадающие в радиус поиска.
-        val photonResults = runCatching {
-            photonSearch(query, lat, lon, MAX_RESULTS)
-        }.getOrDefault(emptyList())
-            .filter { it.distance.isFinite() && it.distance <= SEARCH_RADIUS }
-            .filter { matchesQuery(it, query) }
-            .filterNot { isRestrictedStore(it) }
+        // Photon вызывается только если Overpass не нашёл филиалы.
+        val photonResults = if (osmResults.isEmpty()) {
+            runCatching { photonSearch(query, lat, lon, 30) }
+                .getOrDefault(emptyList())
+                .filter { it.distance.isFinite() && it.distance <= SEARCH_RADIUS }
+                .filter { matchesQuery(it, query) }
+                .filterNot { isRestrictedStore(it) }
+        } else emptyList()
 
-        // Nominatim остаётся последним резервом, если оба основных источника пусты.
         var nominatimError: String? = null
         val fallbackResults = if (osmResults.isEmpty() && photonResults.isEmpty()) {
             try {
@@ -164,16 +178,17 @@ object StoreRepository {
             .filter { it.lat.isFinite() && it.lon.isFinite() && it.lat in -90.0..90.0 && it.lon in -180.0..180.0 }
             .filterNot { isRestrictedStore(it) }
             .distinctBy {
-                "${String.format(Locale.US, "%.5f", it.lat)},${String.format(Locale.US, "%.5f", it.lon)}"
+                "${String.format(Locale.US, "%.5f,%.5f", it.lat, it.lon)}"
             }
-            // Recalculate every candidate from the exact GPS coordinates used for this search.
-            // Do not trust distance values cached by an upstream provider or custom-point record.
             .map { it.copy(distance = distance(lat, lon, it.lat, it.lon)) }
             .filter { it.distance.isFinite() && it.distance <= SEARCH_RADIUS }
             .sortedWith(compareBy<Store> { it.distance }.thenBy { it.name.lowercase(Locale.ROOT) })
             .take(MAX_RESULTS)
 
-        if (combined.isNotEmpty()) return combined
+        if (combined.isNotEmpty()) {
+            memoryCache = SearchCache(normalize(query), lat, lon, System.currentTimeMillis(), combined)
+            return combined
+        }
 
         if (!osmResponded && osmResults.isEmpty() && fallbackResults.isEmpty() && local.isEmpty()) {
             val details = listOfNotNull(osmError, nominatimError).distinct().joinToString("; ")
@@ -274,8 +289,8 @@ object StoreRepository {
         for (url in urls) {
             val connection = URL(url).openConnection() as HttpURLConnection
             try {
-                connection.connectTimeout = 6000
-                connection.readTimeout = 10000
+                connection.connectTimeout = 4000
+                connection.readTimeout = 7500
                 connection.requestMethod = "GET"
                 connection.setRequestProperty("User-Agent", USER_AGENT)
                 connection.setRequestProperty("Accept", "application/geo+json, application/json")
@@ -306,94 +321,117 @@ object StoreRepository {
         val regex = aliasesFor(query).joinToString("|") { escapeOverpass(it) }
         val queryText = if (isGenericCategory(query)) {
             val categoryQuery = if (normalize(query) in setOf("аптека", "аптеки", "pharmacy")) {
-                """nwr(around:$radius,$lat,$lon)["amenity"="pharmacy"]; nwr(around:$radius,$lat,$lon)["shop"="chemist"];"""
+                """nwr(around:${radius},${lat},${lon})["amenity"="pharmacy"]; nwr(around:${radius},${lat},${lon})["shop"="chemist"];"""
             } else {
-                """nwr(around:$radius,$lat,$lon)["shop"~"supermarket|convenience|department_store|general|greengrocer|discount|wholesale|cash_and_carry",i];"""
+                """nwr(around:${radius},${lat},${lon})["shop"~"supermarket|convenience|department_store|general|greengrocer|discount|wholesale|cash_and_carry",i];"""
             }
-            "[out:json][timeout:22];($categoryQuery);out center tags;"
+            "[out:json][timeout:12];($categoryQuery);out center tags;"
         } else {
             """
-                [out:json][timeout:22];
+                [out:json][timeout:12];
                 (
-                  nwr(around:$radius,$lat,$lon)["brand"~"$regex",i];
-                  nwr(around:$radius,$lat,$lon)["brand:ru"~"$regex",i];
-                  nwr(around:$radius,$lat,$lon)["operator"~"$regex",i];
-                  nwr(around:$radius,$lat,$lon)["name"~"$regex",i];
-                  nwr(around:$radius,$lat,$lon)["name:ru"~"$regex",i];
+                  nwr(around:${radius},${lat},${lon})["brand"~"$regex",i];
+                  nwr(around:${radius},${lat},${lon})["brand:ru"~"$regex",i];
+                  nwr(around:${radius},${lat},${lon})["operator"~"$regex",i];
+                  nwr(around:${radius},${lat},${lon})["name"~"$regex",i];
+                  nwr(around:${radius},${lat},${lon})["name:ru"~"$regex",i];
                 );
                 out center tags;
             """.trimIndent()
         }
 
-        var lastError: Exception? = null
-        var successfulResponseReceived = false
-        val endpointErrors = mutableListOf<String>()
-        val allFound = mutableListOf<Store>()
-        for (endpoint in overpassEndpoints) {
-            val connection = URL(endpoint).openConnection() as HttpURLConnection
-            try {
-                connection.connectTimeout = 6000
-                connection.readTimeout = 28000
-                connection.requestMethod = "POST"
-                connection.doOutput = true
-                connection.setRequestProperty("User-Agent", USER_AGENT)
-                connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-                val payload = "data=" + URLEncoder.encode(queryText, "UTF-8")
-                connection.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
-                val code = connection.responseCode
-                if (code !in 200..299) {
-                    val label = when (code) {
-                        429 -> "ограничение частоты запросов (HTTP 429)"
-                        502, 503, 504 -> "сервер перегружен (HTTP $code)"
-                        403, 406 -> "сервер отклонил запрос (HTTP $code)"
-                        else -> "HTTP $code"
-                    }
-                    throw Exception(label)
-                }
-                val elements = JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optJSONArray("elements") ?: JSONArray()
-                successfulResponseReceived = true
-                for (i in 0 until elements.length()) {
-                    val element = elements.optJSONObject(i) ?: continue
-                    val tags = element.optJSONObject("tags") ?: continue
-                    if (!matchesAnyTag(tags, query)) continue
-                    val center = element.optJSONObject("center")
-                    val itemLat = center?.optDouble("lat", Double.NaN) ?: element.optDouble("lat", Double.NaN)
-                    val itemLon = center?.optDouble("lon", Double.NaN) ?: element.optDouble("lon", Double.NaN)
-                    if (!itemLat.isFinite() || !itemLon.isFinite()) continue
-                    // Prefer the tag that actually matches the requested retail chain.
-                    // Some OSM objects have a generic building/site name but the correct
-                    // store brand is stored separately in brand/operator.
-                    val matchingName = listOf("brand:ru", "brand", "name:ru", "name", "operator", "official_name", "alt_name")
-                        .map { tags.optString(it) }
-                        .firstOrNull { value ->
-                            val normalized = normalize(value)
-                            value.isNotBlank() && aliasesFor(query).any { alias ->
-                                val key = normalize(alias)
-                                normalized == key || normalized.contains(key) || key.contains(normalized)
-                            }
-                        }
-                    val name = matchingName
-                        ?: listOf("name:ru", "name", "brand:ru", "brand", "operator", "official_name")
-                            .map { tags.optString(it) }.firstOrNull { it.isNotBlank() }
-                        ?: query
-                    val address = listOf(
-                        tags.optString("addr:city"), tags.optString("addr:street"), tags.optString("addr:housenumber")
-                    ).filter { it.isNotBlank() }.joinToString(", ").ifBlank { "Адрес уточняется по карте" }
-                    val distance = distance(lat, lon, itemLat, itemLon)
-                    if (distance <= radius) allFound += Store(name, address, itemLat, itemLon, distance)
-                }
-                // Объединяем ответы всех доступных зеркал: первое зеркало может быть неполным.
-            } catch (e: Exception) {
-                lastError = e
-                endpointErrors += "${endpoint.substringAfter("https://").substringBefore("/")}: ${e.message ?: "ошибка подключения"}"
-            } finally { connection.disconnect() }
+        val completion = ExecutorCompletionService<List<Store>>(overpassExecutor)
+        overpassEndpoints.forEach { endpoint ->
+            completion.submit(Callable { fetchOverpassEndpoint(endpoint, queryText, query, lat, lon, radius) })
         }
-        if (successfulResponseReceived) return allFound.distinctBy { String.format(Locale.US, "%.5f,%.5f", it.lat, it.lon) }.sortedBy { it.distance }
-        val detail = endpointErrors.distinct().joinToString("; ")
-        throw Exception(
-            if (detail.isBlank()) "Не удалось получить ответ от серверов поиска магазинов. Попробуй позже."
-            else "Сервисы поиска магазинов временно недоступны. Причины: $detail"
-        , lastError)
+        val errors = mutableListOf<String>()
+        var successfulEmpty = false
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(13)
+        repeat(overpassEndpoints.size) {
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0) return@repeat
+            val future = completion.poll(remaining, TimeUnit.NANOSECONDS) ?: return@repeat
+            try {
+                val found = future.get()
+                if (found.isNotEmpty()) {
+                    return found.distinctBy {
+                        String.format(Locale.US, "%.5f,%.5f", it.lat, it.lon)
+                    }.sortedBy { it.distance }
+                }
+                successfulEmpty = true
+            } catch (e: Exception) {
+                errors += (e.cause?.message ?: e.message ?: "ошибка подключения")
+            }
+        }
+        if (successfulEmpty) return emptyList()
+        throw Exception(errors.distinct().take(3).joinToString("; ").ifBlank {
+            "Серверы поиска не ответили за 13 секунд."
+        })
+    }
+
+    private fun fetchOverpassEndpoint(
+        endpoint: String,
+        queryText: String,
+        query: String,
+        lat: Double,
+        lon: Double,
+        radius: Int
+    ): List<Store> {
+        val connection = URL(endpoint).openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = 4500
+            connection.readTimeout = 10000
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setRequestProperty("User-Agent", USER_AGENT)
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+            connection.setRequestProperty("Accept", "application/json")
+            val payload = "data=" + URLEncoder.encode(queryText, "UTF-8")
+            connection.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                val label = when (code) {
+                    429 -> "ограничение запросов (HTTP 429)"
+                    502, 503, 504 -> "сервер перегружен (HTTP $code)"
+                    403, 406 -> "сервер отклонил запрос (HTTP $code)"
+                    else -> "HTTP $code"
+                }
+                throw Exception("$endpoint: $label")
+            }
+            val elements = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+                .optJSONArray("elements") ?: JSONArray()
+            val found = mutableListOf<Store>()
+            for (i in 0 until elements.length()) {
+                val element = elements.optJSONObject(i) ?: continue
+                val tags = element.optJSONObject("tags") ?: continue
+                if (!matchesAnyTag(tags, query)) continue
+                val center = element.optJSONObject("center")
+                val itemLat = center?.optDouble("lat", Double.NaN) ?: element.optDouble("lat", Double.NaN)
+                val itemLon = center?.optDouble("lon", Double.NaN) ?: element.optDouble("lon", Double.NaN)
+                if (!itemLat.isFinite() || !itemLon.isFinite()) continue
+                val matchingName = listOf("brand:ru", "brand", "name:ru", "name", "operator", "official_name", "alt_name")
+                    .map { tags.optString(it) }
+                    .firstOrNull { value ->
+                        val normalized = normalize(value)
+                        value.isNotBlank() && aliasesFor(query).any { alias ->
+                            val key = normalize(alias)
+                            normalized == key || normalized.contains(key) || key.contains(normalized)
+                        }
+                    }
+                val name = matchingName
+                    ?: listOf("name:ru", "name", "brand:ru", "brand", "operator", "official_name")
+                        .map { tags.optString(it) }.firstOrNull { it.isNotBlank() }
+                    ?: query
+                val address = listOf(
+                    tags.optString("addr:city"), tags.optString("addr:street"), tags.optString("addr:housenumber")
+                ).filter { it.isNotBlank() }.joinToString(", ").ifBlank { "Адрес уточняется по карте" }
+                val distance = distance(lat, lon, itemLat, itemLon)
+                if (distance <= radius) found += Store(name, address, itemLat, itemLon, distance)
+            }
+            return found
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun parsePhotonResults(body: String, lat: Double?, lon: Double?): List<Store> {
