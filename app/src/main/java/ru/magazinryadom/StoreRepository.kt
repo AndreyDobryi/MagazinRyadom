@@ -345,23 +345,39 @@ object StoreRepository {
             completion.submit(Callable { fetchOverpassEndpoint(endpoint, queryText, query, lat, lon, radius) })
         }
         val errors = mutableListOf<String>()
+        val merged = mutableListOf<Store>()
         var successfulEmpty = false
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(13)
-        repeat(overpassEndpoints.size) {
-            val remaining = deadline - System.nanoTime()
-            if (remaining <= 0) return@repeat
-            val future = completion.poll(remaining, TimeUnit.NANOSECONDS) ?: return@repeat
+        var completed = 0
+        val overallDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(13)
+        var graceDeadline = Long.MAX_VALUE
+
+        while (completed < overpassEndpoints.size) {
+            val now = System.nanoTime()
+            val deadline = if (merged.isEmpty()) overallDeadline else minOf(overallDeadline, graceDeadline)
+            val remaining = deadline - now
+            if (remaining <= 0) break
+            val future = completion.poll(remaining, TimeUnit.NANOSECONDS) ?: break
+            completed++
             try {
                 val found = future.get()
-                if (found.isNotEmpty()) {
-                    return found.distinctBy {
-                        String.format(Locale.US, "%.5f,%.5f", it.lat, it.lon)
-                    }.sortedBy { it.distance }
+                if (found.isEmpty()) {
+                    successfulEmpty = true
+                } else {
+                    if (merged.isEmpty()) {
+                        // Give other mirrors a short chance to contribute nearer branches.
+                        graceDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1500)
+                    }
+                    merged += found
                 }
-                successfulEmpty = true
             } catch (e: Exception) {
                 errors += (e.cause?.message ?: e.message ?: "ошибка подключения")
             }
+        }
+
+        if (merged.isNotEmpty()) {
+            return merged.distinctBy {
+                String.format(Locale.US, "%.5f,%.5f", it.lat, it.lon)
+            }.sortedBy { it.distance }
         }
         if (successfulEmpty) return emptyList()
         throw Exception(errors.distinct().take(3).joinToString("; ").ifBlank {
