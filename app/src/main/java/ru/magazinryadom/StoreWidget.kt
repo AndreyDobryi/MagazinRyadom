@@ -31,7 +31,11 @@ class StoreWidget : AppWidgetProvider() {
                 val details = when {
                     storeName.isBlank() -> "Ближайший магазин ещё не выбран"
                     address.isBlank() && distance.isBlank() -> storeName
-                    else -> listOf(storeName, address, distance).filter { it.isNotBlank() }.joinToString(" · ")
+                    else -> listOf(
+                        storeName,
+                        address,
+                        if (distance.isNotBlank()) "От тебя: $distance по прямой" else ""
+                    ).filter { it.isNotBlank() }.joinToString(" · ")
                 }
                 views.setTextViewText(R.id.widget_store_details, details)
 
@@ -40,8 +44,11 @@ class StoreWidget : AppWidgetProvider() {
                 if (mapBitmap != null) views.setImageViewBitmap(R.id.widget_map, mapBitmap)
                 else views.setImageViewResource(R.id.widget_map, android.R.color.darker_gray)
 
+                // The launcher widget is a snapshot; tapping its map opens the live,
+                // draggable MapLibre map and asks the app to refresh the current location.
                 val openApp = Intent(context, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra("widget_refresh", true)
                 }
                 val openPending = PendingIntent.getActivity(
                     context, 10, openApp,
