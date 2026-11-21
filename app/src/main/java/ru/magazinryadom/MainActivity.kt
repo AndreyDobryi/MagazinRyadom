@@ -60,11 +60,18 @@ class MainActivity : Activity() {
             if (manualLocationMode) return
             // Reject obviously old fixes; never move the map back to a cached airport coordinate.
             val age = System.currentTimeMillis() - fresh.time
-            if (age > 45_000L || age < -15_000L || fresh.accuracy > 150f) return
+            if (age > 45_000L || age < -15_000L || fresh.accuracy > 100f) return
+            if (isGpsJump(fresh)) {
+                info.text = "GPS выдал скачок координат. Игнорируем эту точку и ждём подтверждения реального местоположения."
+                return
+            }
             currentLocation = fresh
             getSharedPreferences("chosen", MODE_PRIVATE).edit()
                 .putString("user_lat", fresh.latitude.toString())
                 .putString("user_lon", fresh.longitude.toString())
+                .putString("gps_lat", fresh.latitude.toString())
+                .putString("gps_lon", fresh.longitude.toString())
+                .putLong("gps_time", System.currentTimeMillis())
                 .apply()
             val target = selectedStore
             if (target == null) {
@@ -702,11 +709,16 @@ class MainActivity : Activity() {
                         useSavedManualLocationOrWait("Телефон пока не получил GPS. Проверь геолокацию или задай точку вручную.")
                     } else {
                         val age = System.currentTimeMillis() - location.time
-                        if (age > 45000L || age < -15000L || location.accuracy > 150f) {
-                            useSavedManualLocationOrWait("GPS пока неточный (±${location.accuracy.roundToInt()} м). Ждём более точную точку.")
+                        if (age > 45000L || age < -15000L || location.accuracy > 100f || isGpsJump(location)) {
+                            useSavedManualLocationOrWait("GPS пока неточный или координаты резко изменились. Ждём подтверждения корректного местоположения.")
                             startLiveLocation()
                         } else {
                             getSharedPreferences("manual_location", MODE_PRIVATE).edit().clear().apply()
+                            getSharedPreferences("chosen", MODE_PRIVATE).edit()
+                                .putString("gps_lat", location.latitude.toString())
+                                .putString("gps_lon", location.longitude.toString())
+                                .putLong("gps_time", System.currentTimeMillis())
+                                .apply()
                             setCurrentLocation(location, manual = false)
                             startLiveLocation()
                             val savedNetwork = getSharedPreferences("chosen", MODE_PRIVATE).getString("network", null)
@@ -721,6 +733,28 @@ class MainActivity : Activity() {
         } catch (_: SecurityException) {
             info.text = "Нет разрешения на геолокацию. Разреши доступ в настройках Android."
         }
+    }
+
+    /**
+     * Rejects implausible jumps from the last accepted GPS fix. This prevents a
+     * single bad fused/network location (for example, a distant airport) from
+     * replacing a stable position and rebuilding the route there.
+     */
+    private fun isGpsJump(location: Location): Boolean {
+        val prefs = getSharedPreferences("chosen", MODE_PRIVATE)
+        val oldLat = prefs.getString("gps_lat", null)?.toDoubleOrNull() ?: return false
+        val oldLon = prefs.getString("gps_lon", null)?.toDoubleOrNull() ?: return false
+        val oldTime = prefs.getLong("gps_time", 0L)
+        val elapsed = System.currentTimeMillis() - oldTime
+        if (elapsed !in 1L..600_000L) return false
+        val old = Location("last_accepted_gps").apply {
+            latitude = oldLat
+            longitude = oldLon
+        }
+        val moved = old.distanceTo(location).toDouble()
+        val allowed = 1500.0 + (elapsed / 1000.0) * 45.0 +
+            location.accuracy.coerceAtLeast(0f) * 2.0
+        return moved > allowed
     }
 
     private fun useSavedManualLocationOrWait(message: String) {
