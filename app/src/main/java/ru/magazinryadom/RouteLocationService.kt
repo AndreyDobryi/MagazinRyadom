@@ -41,7 +41,7 @@ class RouteLocationService : Service() {
         override fun onLocationResult(result: LocationResult) {
             val location = result.lastLocation ?: return
             val age = System.currentTimeMillis() - location.time
-            if (age > 45_000L || age < -15_000L || location.accuracy > 100f ||
+            if (age > 45_000L || age < -15_000L || location.accuracy > 40f ||
                 (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && location.isMock)
             ) return
 
@@ -49,7 +49,7 @@ class RouteLocationService : Service() {
             if (previous != null) {
                 val elapsed = (location.time - previous.time).coerceAtLeast(1L)
                 val moved = previous.distanceTo(location)
-                val allowed = 1500.0 + (elapsed / 1000.0) * 45.0 + location.accuracy.coerceAtLeast(0f) * 2.0
+                val allowed = 250.0 + (elapsed / 1000.0) * 55.0 + location.accuracy.coerceAtLeast(0f) * 2.0
                 if (moved > allowed) return
             }
             lastLocation = Location(location)
