@@ -21,7 +21,7 @@ import kotlin.math.sqrt
 object StoreRepository {
     private const val PHOTON = "https://photon.komoot.io/api/"
     private const val USER_AGENT = "MagazinRyadom/1.8.4 (Android; OpenStreetMap client)"
-    private const val SEARCH_RADIUS = 10000.0
+    private const val SEARCH_RADIUS = 3000.0
     private const val MAX_RESULTS = 100
     private data class SearchCache(val query: String, val lat: Double, val lon: Double, val savedAt: Long, val stores: List<Store>)
     @Volatile private var memoryCache: SearchCache? = null
