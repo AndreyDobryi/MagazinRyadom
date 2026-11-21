@@ -60,10 +60,30 @@ object StoreRepository {
         "максидом" to listOf("Максидом", "Maxidom"),
         "касторама" to listOf("Castorama", "Касторама"),
         "яндекс лавка" to listOf("Яндекс Лавка", "Yandex Lavka"),
-        "вкусно и точка" to listOf("Вкусно — и точка", "Вкусно и точка"),
-        "бургер кинг" to listOf("Бургер Кинг", "Burger King"),
-        "ростикс" to listOf("Rostic's", "Ростикс", "KFC"),
-        "теремок" to listOf("Теремок", "Teremok"),
+        "wildberries" to listOf("Wildberries", "Вайлдберриз"),
+        "вайлдберриз" to listOf("Wildberries", "Вайлдберриз"),
+        "ozon" to listOf("Ozon", "Озон"),
+        "озон" to listOf("Ozon", "Озон"),
+        "kari" to listOf("Kari", "Кари"),
+        "глория джинс" to listOf("Gloria Jeans", "Глория Джинс"),
+        "familia" to listOf("Familia", "Фамилия"),
+        "летуаль" to listOf("Л'Этуаль", "Летуаль", "L'Etoile"),
+        "рив гош" to listOf("РИВ ГОШ", "Rive Gauche"),
+        "читай город" to listOf("Читай-город", "Читай город"),
+        "буквоед" to listOf("Буквоед", "Bookvoed"),
+        "комус" to listOf("Комус", "Komus"),
+        "все инструменты" to listOf("ВсеИнструменты.ру", "Все инструменты"),
+        "585 золотой" to listOf("585 Золотой", "585 Gold"),
+        "sunlight" to listOf("SUNLIGHT", "Санлайт"),
+        "санлайт" to listOf("SUNLIGHT", "Санлайт"),
+        "леонардо" to listOf("Леонардо", "Leonardo"),
+        "четыре лапы" to listOf("Четыре Лапы", "4 Лапы"),
+        "зоозавр" to listOf("Зоозавр", "Zoozavr"),
+        "petshop" to listOf("Petshop", "Петшоп"),
+        "эконика" to listOf("Эконика", "Ekonika"),
+        "befree" to listOf("Befree", "Бифри"),
+        "sela" to listOf("Sela", "Села"),
+        "henderson" to listOf("HENDERSON", "Хендерсон"),
         "перекресток экспресс" to listOf("Перекрёсток Экспресс", "Перекресток Экспресс"),
         "горздрав" to listOf("Горздрав", "Gorzdrav"),
         "ригла" to listOf("Ригла", "Rigla"),
@@ -167,7 +187,8 @@ object StoreRepository {
 
     private fun matchesQuery(store: Store, query: String): Boolean {
         val aliases = aliasesFor(query).map(::normalize)
-        val haystack = normalize("${store.name} ${store.address}")
+        // Match the retail brand/name only. Street or city text must never make a branch a false match.
+        val haystack = normalize(store.name)
         return aliases.any { it.isNotBlank() && (haystack.contains(it) || it.split(' ').all { word -> word in haystack }) }
     }
 
