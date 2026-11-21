@@ -35,8 +35,10 @@ object MapTile {
     ): Bitmap? {
         if (!valid(userLat, userLon) || !valid(storeLat, storeLon)) return null
         return try {
-            val centerLat = (userLat + storeLat) / 2.0
-            val centerLon = (userLon + storeLon) / 2.0
+            // The launcher widget must always show the user's own position at its center.
+            // The store and route are drawn relative to this point, never the midpoint of the route.
+            val centerLat = userLat
+            val centerLon = userLon
             val straightDistance = distanceMeters(userLat, userLon, storeLat, storeLon)
             val zoom = when {
                 straightDistance > 8000.0 -> 12
