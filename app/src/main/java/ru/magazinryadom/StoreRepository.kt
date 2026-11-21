@@ -417,17 +417,18 @@ object StoreRepository {
         return output
     }
 
-    /** Пешеходная геометрия с повторными попытками при временной недоступности сервера. */
+    /** Пеший маршрут: основной OSRM-сервис и независимый резерв Valhalla. */
     fun walkingRoute(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): List<Pair<Double, Double>> {
         require(fromLat.isFinite() && fromLon.isFinite() && toLat.isFinite() && toLon.isFinite()) { "Некорректные координаты маршрута." }
         require(fromLat in -90.0..90.0 && toLat in -90.0..90.0 && fromLon in -180.0..180.0 && toLon in -180.0..180.0) { "Координаты маршрута вне допустимого диапазона." }
-        val url = "https://routing.openstreetmap.de/routed-foot/route/v1/driving/$fromLon,$fromLat;$toLon,$toLat?overview=full&geometries=geojson&steps=true"
-        var lastError: Exception? = null
-        for (attempt in 0..2) {
-            val connection = URL(url).openConnection() as HttpURLConnection
+
+        var primaryError: Exception? = null
+        val osrmUrl = "https://routing.openstreetmap.de/routed-foot/route/v1/driving/$fromLon,$fromLat;$toLon,$toLat?overview=full&geometries=geojson&steps=false"
+        try {
+            val connection = URL(osrmUrl).openConnection() as HttpURLConnection
             try {
-                connection.connectTimeout = 15000
-                connection.readTimeout = 30000
+                connection.connectTimeout = 10000
+                connection.readTimeout = 16000
                 connection.requestMethod = "GET"
                 connection.instanceFollowRedirects = true
                 connection.setRequestProperty("User-Agent", USER_AGENT)
@@ -435,41 +436,116 @@ object StoreRepository {
                 val code = connection.responseCode
                 val stream = if (code in 200..299) connection.inputStream else connection.errorStream
                 val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-                if (code !in 200..299) throw Exception("Сервис маршрутов ответил HTTP $code.")
+                if (code !in 200..299) throw Exception("OSRM HTTP $code")
                 val response = JSONObject(body)
                 val status = response.optString("code")
-                if (status.isNotBlank() && status != "Ok") {
-                    val message = response.optString("message").ifBlank { status }
-                    throw Exception("Пеший маршрут не найден: $message")
-                }
-                val routes = response.optJSONArray("routes") ?: throw Exception("Сервис маршрутов вернул пустой ответ.")
-                if (routes.length() == 0) throw Exception("Между этими точками не найден пеший маршрут.")
-                val coordinates = routes.optJSONObject(0)?.optJSONObject("geometry")?.optJSONArray("coordinates")
-                    ?: throw Exception("В ответе сервиса отсутствует геометрия маршрута.")
-                val points = (0 until coordinates.length()).mapNotNull { i ->
-                    val pair = coordinates.optJSONArray(i) ?: return@mapNotNull null
+                if (status.isNotBlank() && status != "Ok") throw Exception(response.optString("message").ifBlank { status })
+                val routes = response.optJSONArray("routes") ?: throw Exception("OSRM не вернул маршруты")
+                val coords = routes.optJSONObject(0)?.optJSONObject("geometry")?.optJSONArray("coordinates")
+                    ?: throw Exception("OSRM не вернул линию маршрута")
+                val points = (0 until coords.length()).mapNotNull { index ->
+                    val pair = coords.optJSONArray(index) ?: return@mapNotNull null
                     if (pair.length() < 2) return@mapNotNull null
                     val lon = pair.optDouble(0, Double.NaN)
                     val lat = pair.optDouble(1, Double.NaN)
                     if (lat.isFinite() && lon.isFinite()) lat to lon else null
                 }
-                if (points.size < 2) throw Exception("Сервис вернул слишком мало точек маршрута.")
-                return points
-            } catch (e: Exception) {
-                lastError = e
-                // Повторяем только временные сетевые/серверные ошибки; NoRoute повторять бессмысленно.
-                val message = e.message.orEmpty()
-                if (message.contains("маршрут не найден", ignoreCase = true) || message.contains("между этими точками", ignoreCase = true)) break
-                if (attempt < 2) {
-                    try { Thread.sleep(700L * (attempt + 1)) }
-                    catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
-                }
+                if (points.size >= 2) return points
+                throw Exception("OSRM вернул слишком мало точек")
             } finally {
                 connection.disconnect()
             }
+        } catch (e: Exception) {
+            primaryError = e
         }
-        throw Exception(lastError?.message ?: "Не удалось связаться с сервисом пеших маршрутов после трёх попыток.", lastError)
+
+        // Резервный независимый движок маршрутизации. Публичный сервер FOSSGIS
+        // поддерживает pedestrian costing и GeoJSON-геометрию.
+        try {
+            val payload = JSONObject().apply {
+                put("locations", JSONArray().apply {
+                    put(JSONObject().put("lat", fromLat).put("lon", fromLon).put("type", "break"))
+                    put(JSONObject().put("lat", toLat).put("lon", toLon).put("type", "break"))
+                })
+                put("costing", "pedestrian")
+                put("units", "kilometers")
+                put("language", "ru-RU")
+                put("shape_format", "geojson")
+                put("directions_type", "none")
+            }
+            val connection = URL("https://valhalla1.openstreetmap.de/route").openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = 12000
+                connection.readTimeout = 20000
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.setRequestProperty("User-Agent", USER_AGENT)
+                connection.setRequestProperty("X-Client-Id", "MagazinRyadom Android")
+                connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                connection.setRequestProperty("Accept", "application/json")
+                connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                if (code !in 200..299) throw Exception("Valhalla HTTP $code")
+                val response = JSONObject(body)
+                val trip = response.optJSONObject("trip") ?: throw Exception(
+                    response.optJSONObject("error")?.optString("message") ?: "Valhalla не вернул маршрут"
+                )
+                val legs = trip.optJSONArray("legs") ?: throw Exception("В ответе Valhalla нет участков маршрута")
+                val points = mutableListOf<Pair<Double, Double>>()
+                for (i in 0 until legs.length()) {
+                    val shape = legs.optJSONObject(i)?.opt("shape")
+                    val coordinates = (shape as? JSONObject)?.optJSONArray("coordinates")
+                    if (coordinates != null) {
+                        for (j in 0 until coordinates.length()) {
+                            val pair = coordinates.optJSONArray(j) ?: continue
+                            if (pair.length() < 2) continue
+                            val lon = pair.optDouble(0, Double.NaN)
+                            val lat = pair.optDouble(1, Double.NaN)
+                            if (lat.isFinite() && lon.isFinite()) points += lat to lon
+                        }
+                    } else if (shape is String) {
+                        points += decodePolyline6(shape)
+                    }
+                }
+                if (points.size < 2) throw Exception("Valhalla вернул пустую геометрию маршрута")
+                return points
+            } finally {
+                connection.disconnect()
+            }
+        } catch (fallbackError: Exception) {
+            val primary = primaryError?.message ?: "основной сервис недоступен"
+            throw Exception("Не удалось загрузить линию маршрута. OSRM: $primary. Резервный сервис: ${fallbackError.message ?: "ошибка подключения"}.", fallbackError)
+        }
     }
+
+    /** Декодирование полилинии Valhalla с точностью 6 знаков, если сервер вернул её строкой. */
+    private fun decodePolyline6(encoded: String): List<Pair<Double, Double>> {
+        val points = mutableListOf<Pair<Double, Double>>()
+        var index = 0
+        var lat = 0
+        var lon = 0
+        while (index < encoded.length) {
+            fun readValue(): Int {
+                var result = 0
+                var shift = 0
+                var chunk: Int
+                do {
+                    if (index >= encoded.length) throw Exception("Повреждена геометрия маршрута")
+                    chunk = encoded[index++].code - 63
+                    result = result or ((chunk and 0x1f) shl shift)
+                    shift += 5
+                } while (chunk >= 0x20)
+                return if ((result and 1) != 0) (result shr 1).inv() else result shr 1
+            }
+            lat += readValue()
+            lon += readValue()
+            points += (lat / 1_000_000.0) to (lon / 1_000_000.0)
+        }
+        return points
+    }
+
     fun geocode(address: String): Pair<Double, Double> {
         val encoded = URLEncoder.encode(address, "UTF-8")
         val photonUrl = "${PHOTON}?q=$encoded&limit=1&lang=ru"
