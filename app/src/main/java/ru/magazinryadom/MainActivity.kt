@@ -526,7 +526,7 @@ class MainActivity : Activity() {
             }
             val imageFile = File(cacheDir, "widget-map.png")
             imageFile.delete()
-            val bitmap = MapTile.make(location.latitude, location.longitude, store.lat, store.lon, walkingPath)
+            val bitmap = MapTile.make(this@MainActivity, location.latitude, location.longitude, store.lat, store.lon, walkingPath)
             val mapSaved = if (bitmap != null) {
                 val saved = try {
                     imageFile.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, it) }
@@ -887,7 +887,7 @@ class MainActivity : Activity() {
             } catch (_: Exception) { emptyList() }
             val distance = StoreRepository.distance(location.latitude, location.longitude, store.lat, store.lon)
             val imageFile = File(cacheDir, "widget-map.png")
-            val bitmap = MapTile.make(location.latitude, location.longitude, store.lat, store.lon, path)
+            val bitmap = MapTile.make(this@MainActivity, location.latitude, location.longitude, store.lat, store.lon, path)
             val saved = if (bitmap != null) {
                 try { imageFile.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 88, it) } }
                 catch (_: Exception) { false }
