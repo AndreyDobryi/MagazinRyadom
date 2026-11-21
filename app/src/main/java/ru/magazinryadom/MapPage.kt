@@ -27,7 +27,6 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
     private val mapView: MapView
     private var followUser = true
     private var cameraInitialized = false
-    private var routeFramed = false
     private var recenterButton: TextView? = null
     private var map: MapLibreMap? = null
     private var styleReady = false
@@ -48,6 +47,17 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
             (360 * context.resources.displayMetrics.density).toInt()
         )
         mapView = MapView(context)
+        // Keep map gestures inside the MapView instead of the surrounding ScrollView.
+        mapView.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN,
+                android.view.MotionEvent.ACTION_POINTER_DOWN,
+                android.view.MotionEvent.ACTION_MOVE -> mapView.parent?.requestDisallowInterceptTouchEvent(true)
+                android.view.MotionEvent.ACTION_UP,
+                android.view.MotionEvent.ACTION_CANCEL -> mapView.parent?.requestDisallowInterceptTouchEvent(false)
+            }
+            false
+        }
         view.addView(mapView, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
@@ -64,7 +74,7 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
                 followUser = true
                 visibility = android.view.View.GONE
                 pendingUser?.let { point ->
-                    val zoom = map?.cameraPosition?.zoom ?: 16.0
+                    val zoom = (map?.cameraPosition?.zoom ?: 17.3).coerceAtLeast(17.3)
                     map?.animateCamera(CameraUpdateFactory.newLatLngZoom(point, zoom))
                 }
             }
@@ -134,24 +144,12 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
             storeMarkerIcon?.let { marker.icon(it) }
             activeMap.addMarker(marker)
         }
-        if (pendingRoute.size >= 2 && !routeFramed) {
-            try {
-                val bounds = org.maplibre.android.geometry.LatLngBounds.Builder().apply {
-                    include(user)
-                    pendingRoute.forEach { include(LatLng(it.first, it.second)) }
-                    pendingStores.firstOrNull()?.let { include(LatLng(it.lat, it.lon)) }
-                }.build()
-                activeMap.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 56))
-            } catch (_: Exception) {
-                activeMap.animateCamera(CameraUpdateFactory.newLatLngZoom(user, 15.0))
-            }
-            routeFramed = true
-            cameraInitialized = true
-        } else if (!cameraInitialized) {
-            activeMap.setCameraPosition(CameraPosition.Builder().target(user).zoom(16.0).build())
+        // Navigation-style framing: keep the user close-up; never fit the whole route.
+        if (!cameraInitialized) {
+            activeMap.setCameraPosition(CameraPosition.Builder().target(user).zoom(17.3).build())
             cameraInitialized = true
         } else if (followUser) {
-            val zoom = activeMap.cameraPosition.zoom.coerceAtLeast(15.0)
+            val zoom = activeMap.cameraPosition.zoom.coerceAtLeast(17.3)
             activeMap.animateCamera(CameraUpdateFactory.newLatLngZoom(user, zoom))
         }
     }
