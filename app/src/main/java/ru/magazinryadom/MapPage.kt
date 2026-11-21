@@ -84,7 +84,7 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
             mapboxMap.uiSettings.isTiltGesturesEnabled = true
             mapboxMap.uiSettings.isCompassEnabled = true
             mapboxMap.addOnCameraMoveStartedListener { reason ->
-                if (reason == MapLibreMap.OnCameraMoveStartedListener.REASON_GESTURE) {
+                if (reason == 1) {
                     followUser = false
                     recenterButton?.visibility = android.view.View.VISIBLE
                 }
