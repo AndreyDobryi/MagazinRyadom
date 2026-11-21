@@ -11,8 +11,8 @@ android {
         applicationId = "ru.magazinryadom"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "1.9.0"
+        versionCode = 17
+        versionName = "1.9.1"
     }
 
     compileOptions {
