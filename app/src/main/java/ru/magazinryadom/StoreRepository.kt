@@ -17,7 +17,7 @@ import kotlin.math.sqrt
 object StoreRepository {
     private const val PHOTON = "https://photon.komoot.io/api/"
     private const val USER_AGENT = "MagazinRyadom/1.8.4 (Android; OpenStreetMap client)"
-    private const val SEARCH_RADIUS = 12000.0
+    private const val SEARCH_RADIUS = 3000.0
     private const val MAX_RESULTS = 100
     // Prefer the VK Maps / Mail.ru public Overpass instance, which explicitly
     // welcomes app usage. Keep other instances as sequential fallbacks only.
@@ -360,8 +360,22 @@ object StoreRepository {
                     val itemLat = center?.optDouble("lat", Double.NaN) ?: element.optDouble("lat", Double.NaN)
                     val itemLon = center?.optDouble("lon", Double.NaN) ?: element.optDouble("lon", Double.NaN)
                     if (!itemLat.isFinite() || !itemLon.isFinite()) continue
-                    val name = listOf("name:ru", "name", "brand:ru", "brand", "operator", "official_name")
-                        .map { tags.optString(it) }.firstOrNull { it.isNotBlank() } ?: query
+                    // Prefer the tag that actually matches the requested retail chain.
+                    // Some OSM objects have a generic building/site name but the correct
+                    // store brand is stored separately in brand/operator.
+                    val matchingName = listOf("brand:ru", "brand", "name:ru", "name", "operator", "official_name", "alt_name")
+                        .map { tags.optString(it) }
+                        .firstOrNull { value ->
+                            val normalized = normalize(value)
+                            value.isNotBlank() && aliasesFor(query).any { alias ->
+                                val key = normalize(alias)
+                                normalized == key || normalized.contains(key) || key.contains(normalized)
+                            }
+                        }
+                    val name = matchingName
+                        ?: listOf("name:ru", "name", "brand:ru", "brand", "operator", "official_name")
+                            .map { tags.optString(it) }.firstOrNull { it.isNotBlank() }
+                        ?: query
                     val address = listOf(
                         tags.optString("addr:city"), tags.optString("addr:street"), tags.optString("addr:housenumber")
                     ).filter { it.isNotBlank() }.joinToString(", ").ifBlank { "Адрес уточняется по карте" }
