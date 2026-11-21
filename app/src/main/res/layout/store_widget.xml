@@ -33,12 +33,31 @@
         android:maxLines="2"
         android:ellipsize="end" />
 
-    <ImageView
-        android:id="@+id/widget_map"
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:background="#292D34"
-        android:scaleType="centerCrop"
-        android:contentDescription="Карта с выбранным магазином и зелёным пешим маршрутом" />
+        android:background="#E8EBE6">
+
+        <ImageView
+            android:id="@+id/widget_map"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="centerCrop"
+            android:contentDescription="Снимок карты с вашим местоположением, магазином и маршрутом" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="4dp"
+            android:paddingStart="5dp"
+            android:paddingEnd="5dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:text="© OpenStreetMap"
+            android:textColor="#454B50"
+            android:textSize="8sp"
+            android:background="#DDEFEFEF" />
+    </FrameLayout>
 </LinearLayout>
