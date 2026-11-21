@@ -94,6 +94,7 @@ object StoreRepository {
         "перекресток экспресс" to listOf("Перекрёсток Экспресс", "Перекресток Экспресс"),
         "горздрав" to listOf("Горздрав", "Gorzdrav"),
         "ригла" to listOf("Ригла", "Rigla"),
+        "красное&белое" to listOf("Красное&Белое", "Красное&белое", "кбшка", "Кб"),
         "36 6" to listOf("36,6", "36.6"),
         "аптека" to listOf("аптека", "pharmacy")
     )
@@ -216,14 +217,13 @@ object StoreRepository {
     private fun isRestrictedQuery(query: String): Boolean {
         val q = normalize(query).replace(" ", "")
         return listOf(
-            "красноебелое", "кб", "алкоголь", "алкомаркет", "винныймагазин",
-            "liquorstore", "alcoholshop", "liquor"
+            "liquor"
         ).any { q.contains(it) }
     }
 
     private fun isRestrictedStore(store: Store): Boolean {
         val name = normalize(store.name)
-        return listOf("красное и белое", "красное белое", "алкомаркет", "алкогольный магазин")
+        return listOf("алкогольный магазин")
             .any { name.contains(normalize(it)) }
     }
 
