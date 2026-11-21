@@ -403,28 +403,59 @@ object StoreRepository {
         return output
     }
 
-    /** Пешеходная геометрия с публичного OSM foot-routing сервера. */
+    /** Пешеходная геометрия с повторными попытками при временной недоступности сервера. */
     fun walkingRoute(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): List<Pair<Double, Double>> {
+        require(fromLat.isFinite() && fromLon.isFinite() && toLat.isFinite() && toLon.isFinite()) { "Некорректные координаты маршрута." }
+        require(fromLat in -90.0..90.0 && toLat in -90.0..90.0 && fromLon in -180.0..180.0 && toLon in -180.0..180.0) { "Координаты маршрута вне допустимого диапазона." }
         val url = "https://routing.openstreetmap.de/routed-foot/route/v1/driving/$fromLon,$fromLat;$toLon,$toLat?overview=full&geometries=geojson&steps=true"
-        val connection = URL(url).openConnection() as HttpURLConnection
-        try {
-            connection.connectTimeout = 10000
-            connection.readTimeout = 18000
-            connection.setRequestProperty("User-Agent", USER_AGENT)
-            if (connection.responseCode !in 200..299) throw Exception("Сервис пеших маршрутов временно не ответил.")
-            val routes = JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optJSONArray("routes") ?: JSONArray()
-            if (routes.length() == 0) return emptyList()
-            val coordinates = routes.optJSONObject(0)?.optJSONObject("geometry")?.optJSONArray("coordinates") ?: return emptyList()
-            return (0 until coordinates.length()).mapNotNull { i ->
-                val pair = coordinates.optJSONArray(i) ?: return@mapNotNull null
-                if (pair.length() < 2) return@mapNotNull null
-                val lon = pair.optDouble(0, Double.NaN)
-                val lat = pair.optDouble(1, Double.NaN)
-                if (lat.isFinite() && lon.isFinite()) lat to lon else null
+        var lastError: Exception? = null
+        for (attempt in 0..2) {
+            val connection = URL(url).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = 15000
+                connection.readTimeout = 30000
+                connection.requestMethod = "GET"
+                connection.instanceFollowRedirects = true
+                connection.setRequestProperty("User-Agent", USER_AGENT)
+                connection.setRequestProperty("Accept", "application/json")
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                if (code !in 200..299) throw Exception("Сервис маршрутов ответил HTTP $code.")
+                val response = JSONObject(body)
+                val status = response.optString("code")
+                if (status.isNotBlank() && status != "Ok") {
+                    val message = response.optString("message").ifBlank { status }
+                    throw Exception("Пеший маршрут не найден: $message")
+                }
+                val routes = response.optJSONArray("routes") ?: throw Exception("Сервис маршрутов вернул пустой ответ.")
+                if (routes.length() == 0) throw Exception("Между этими точками не найден пеший маршрут.")
+                val coordinates = routes.optJSONObject(0)?.optJSONObject("geometry")?.optJSONArray("coordinates")
+                    ?: throw Exception("В ответе сервиса отсутствует геометрия маршрута.")
+                val points = (0 until coordinates.length()).mapNotNull { i ->
+                    val pair = coordinates.optJSONArray(i) ?: return@mapNotNull null
+                    if (pair.length() < 2) return@mapNotNull null
+                    val lon = pair.optDouble(0, Double.NaN)
+                    val lat = pair.optDouble(1, Double.NaN)
+                    if (lat.isFinite() && lon.isFinite()) lat to lon else null
+                }
+                if (points.size < 2) throw Exception("Сервис вернул слишком мало точек маршрута.")
+                return points
+            } catch (e: Exception) {
+                lastError = e
+                // Повторяем только временные сетевые/серверные ошибки; NoRoute повторять бессмысленно.
+                val message = e.message.orEmpty()
+                if (message.contains("маршрут не найден", ignoreCase = true) || message.contains("между этими точками", ignoreCase = true)) break
+                if (attempt < 2) {
+                    try { Thread.sleep(700L * (attempt + 1)) }
+                    catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
+                }
+            } finally {
+                connection.disconnect()
             }
-        } finally { connection.disconnect() }
+        }
+        throw Exception(lastError?.message ?: "Не удалось связаться с сервисом пеших маршрутов после трёх попыток.", lastError)
     }
-
     fun geocode(address: String): Pair<Double, Double> {
         val encoded = URLEncoder.encode(address, "UTF-8")
         val photonUrl = "${PHOTON}?q=$encoded&limit=1&lang=ru"
