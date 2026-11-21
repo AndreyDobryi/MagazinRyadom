@@ -424,6 +424,7 @@ class MainActivity : Activity() {
         val requestId = ++searchGeneration
         selectedNetwork = query
         selectedStore = null
+        stopTrackingService()
         routeButton.isEnabled = false
         getSharedPreferences("chosen", MODE_PRIVATE).edit()
             .putString("network", query)
@@ -550,6 +551,7 @@ class MainActivity : Activity() {
             lastRouteRefreshAt = System.currentTimeMillis()
             runOnUiThread {
                 StoreWidget.update(this)
+                startTrackingService()
                 mapPage.show(location.latitude, location.longitude, listOf(store), walkingPath)
                 info.text = if (walkingPath.size >= 2) {
                     "Ближайшая точка: ${store.name}. Пешком ${formatDistance(pathLength(walkingPath))} · около ${kotlin.math.ceil(pathLength(walkingPath) / 80.0).toInt()} мин. Зелёная линия — маршрут."
@@ -835,7 +837,10 @@ class MainActivity : Activity() {
 
     private fun setCurrentLocation(location: Location, manual: Boolean = false) {
         manualLocationMode = manual
-        if (manual) stopLiveLocation()
+        if (manual) {
+            stopLiveLocation()
+            stopTrackingService()
+        }
         currentLocation = location
         getSharedPreferences("chosen", MODE_PRIVATE).edit()
             .putString("user_lat", location.latitude.toString())
@@ -931,6 +936,22 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun startTrackingService() {
+        if (!hasLocationPermission()) return
+        val intent = Intent(this, RouteLocationService::class.java).apply {
+            action = RouteLocationService.ACTION_START
+        }
+        try {
+            ContextCompat.startForegroundService(this, intent)
+        } catch (_: Exception) {
+            info.text = "Не удалось запустить фоновое отслеживание. Проверь разрешения и уведомления."
+        }
+    }
+
+    private fun stopTrackingService() {
+        stopService(Intent(this, RouteLocationService::class.java))
     }
 
     private fun hasLocationPermission(): Boolean =
