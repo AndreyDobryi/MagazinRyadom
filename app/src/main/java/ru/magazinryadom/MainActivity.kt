@@ -355,11 +355,6 @@ class MainActivity : Activity() {
             .replace(Regex("[^\\p{L}\\p{N}]+"), " ")
             .trim()
         return listOf(
-            "красное белое",
-            "красное и белое",
-            "алкомаркет",
-            "винный магазин",
-            "магазин алкоголя",
             "алкогольный магазин"
         ).any { normalized.contains(it) }
     }
@@ -387,7 +382,7 @@ class MainActivity : Activity() {
             "РИВ ГОШ", "Читай-город", "Буквоед", "Комус", "ВсеИнструменты.ру",
             "585 Золотой", "SUNLIGHT", "Леонардо", "Четыре Лапы", "Зоозавр",
             "Petshop", "Эконика", "Befree", "Sela", "HENDERSON", "Горздрав",
-            "Ригла", "36,6", "Супермаркет", "Аптека"
+            "Ригла", "36,6", "Красное&Белое", "Супермаркет", "Аптека"
         )
         fun key(value: String) = value.lowercase(Locale.ROOT).replace('ё', 'е').replace(Regex("\\s+"), " ").trim()
         val normalizedQuery = key(query)
