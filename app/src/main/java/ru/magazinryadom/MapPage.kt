@@ -1,27 +1,30 @@
 package ru.magazinryadom
 
 import android.content.Context
-import android.view.ViewGroup
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.TextView
 import org.maplibre.android.MapLibre
+import org.maplibre.android.annotations.Icon
+import org.maplibre.android.annotations.IconFactory
+import org.maplibre.android.annotations.MarkerOptions
+import org.maplibre.android.annotations.PolylineOptions
 import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
-import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.MapLibreMap
+import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
-import org.maplibre.android.annotations.MarkerOptions
-import org.maplibre.android.annotations.Icon
-import org.maplibre.android.annotations.IconFactory
-import org.maplibre.android.annotations.PolylineOptions
-import android.graphics.Color
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Paint
 
-/** Нативная карта MapLibre. Базовый стиль использует растровые тайлы OSM. */
+/** Интерактивная векторная карта на базе бесплатного OpenFreeMap. */
 class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
     val view: FrameLayout
     private val mapView: MapView
@@ -39,8 +42,8 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
 
     init {
         MapLibre.getInstance(context.applicationContext)
-        userMarkerIcon = markerIcon(context, Color.rgb(45, 125, 235))
-        storeMarkerIcon = markerIcon(context, Color.rgb(218, 165, 32))
+        userMarkerIcon = markerIcon(context, Color.rgb(35, 125, 245))
+        storeMarkerIcon = markerIcon(context, Color.rgb(230, 160, 35))
         view = FrameLayout(context)
         view.layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -61,42 +64,79 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
         view.addView(mapView, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        mapView.onCreate(savedInstanceState)
-        val recenter = TextView(context).apply {
-            text = "◎"
-            textSize = 25f
+
+        // Familiar floating controls: return to location and adjust zoom.
+        val controls = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.rgb(35, 42, 52))
-            elevation = 8f
-            visibility = android.view.View.GONE
-            setOnClickListener {
-                followUser = true
-                visibility = android.view.View.GONE
-                pendingUser?.let { point ->
-                    val zoom = (map?.cameraPosition?.zoom ?: 17.3).coerceAtLeast(17.3)
-                    map?.animateCamera(CameraUpdateFactory.newLatLngZoom(point, zoom))
+        }
+        val density = context.resources.displayMetrics.density
+        fun addControl(symbol: String, description: String, action: () -> Unit): TextView {
+            val button = TextView(context).apply {
+                text = symbol
+                contentDescription = description
+                textSize = if (symbol == "◎") 25f else 27f
+                gravity = Gravity.CENTER
+                setTextColor(Color.rgb(40, 50, 62))
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.WHITE)
+                    setStroke((1 * density).toInt().coerceAtLeast(1), Color.rgb(225, 229, 234))
                 }
+                elevation = 7 * density
+                setOnClickListener { action() }
+            }
+            controls.addView(button, LinearLayout.LayoutParams(
+                (46 * density).toInt(), (46 * density).toInt()
+            ).apply { bottomMargin = (8 * density).toInt() })
+            return button
+        }
+
+        recenterButton = addControl("◎", "Вернуться к моему местоположению") {
+            followUser = true
+            recenterButton?.visibility = View.GONE
+            pendingUser?.let { point ->
+                val zoom = (map?.cameraPosition?.zoom ?: 17.3).coerceAtLeast(17.3)
+                map?.animateCamera(CameraUpdateFactory.newLatLngZoom(point, zoom))
+            }
+        }.apply { visibility = View.GONE }
+
+        addControl("+", "Приблизить карту") {
+            map?.let { activeMap ->
+                activeMap.animateCamera(CameraUpdateFactory.zoomIn())
             }
         }
-        val buttonSize = (46 * context.resources.displayMetrics.density).toInt()
-        val buttonParams = FrameLayout.LayoutParams(buttonSize, buttonSize, Gravity.END or Gravity.TOP).apply {
-            topMargin = (12 * context.resources.displayMetrics.density).toInt()
-            marginEnd = (12 * context.resources.displayMetrics.density).toInt()
+        addControl("−", "Отдалить карту") {
+            map?.let { activeMap ->
+                activeMap.animateCamera(CameraUpdateFactory.zoomOut())
+            }
         }
-        view.addView(recenter, buttonParams)
-        recenterButton = recenter
+
+        val controlsParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.END or Gravity.TOP
+        ).apply {
+            topMargin = (12 * density).toInt()
+            marginEnd = (12 * density).toInt()
+        }
+        view.addView(controls, controlsParams)
+
+        mapView.onCreate(savedInstanceState)
         mapView.getMapAsync { mapboxMap ->
             map = mapboxMap
             mapboxMap.uiSettings.isScrollGesturesEnabled = true
             mapboxMap.uiSettings.isZoomGesturesEnabled = true
-            mapboxMap.uiSettings.isRotateGesturesEnabled = true
-            mapboxMap.uiSettings.isTiltGesturesEnabled = true
+            // Keep north at the top so the map is easier to read while navigating.
+            mapboxMap.uiSettings.isRotateGesturesEnabled = false
+            mapboxMap.uiSettings.isTiltGesturesEnabled = false
             mapboxMap.uiSettings.isCompassEnabled = true
+            mapboxMap.uiSettings.isLogoEnabled = true
+            mapboxMap.uiSettings.isAttributionEnabled = true
             mapboxMap.addOnCameraMoveStartedListener { reason ->
                 if (reason == 1) {
                     followUser = false
-                    recenterButton?.visibility = android.view.View.VISIBLE
+                    recenterButton?.visibility = View.VISIBLE
                 }
             }
             mapboxMap.addOnMapClickListener { point ->
@@ -107,7 +147,7 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
                     true
                 } else false
             }
-            mapboxMap.setStyle(Style.Builder().fromJson(styleJson())) {
+            mapboxMap.setStyle(Style.Builder().fromUri("https://tiles.openfreemap.org/styles/bright")) {
                 styleReady = true
                 renderPending()
             }
@@ -134,7 +174,11 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
         activeMap.addMarker(userMarker)
         if (pendingRoute.size >= 2) {
             val points = pendingRoute.map { LatLng(it.first, it.second) }
-            activeMap.addPolyline(PolylineOptions().addAll(points).color(Color.rgb(35, 170, 95)).width(6f))
+            activeMap.addPolyline(
+                PolylineOptions().addAll(points)
+                    .color(Color.rgb(35, 170, 95))
+                    .width(6f)
+            )
         }
         pendingStores.forEach { store ->
             val marker = MarkerOptions()
@@ -144,7 +188,7 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
             storeMarkerIcon?.let { marker.icon(it) }
             activeMap.addMarker(marker)
         }
-        // Navigation-style framing: keep the user close-up; never fit the whole route.
+        // Keep the user's position close-up; never zoom out to fit the entire route.
         if (!cameraInitialized) {
             activeMap.setCameraPosition(CameraPosition.Builder().target(user).zoom(17.3).build())
             cameraInitialized = true
@@ -159,11 +203,11 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         paint.color = Color.WHITE
-        canvas.drawCircle(32f, 32f, 17f, paint)
+        canvas.drawCircle(32f, 32f, 18f, paint)
         paint.color = color
-        canvas.drawCircle(32f, 32f, 13f, paint)
+        canvas.drawCircle(32f, 32f, 14f, paint)
         paint.color = Color.WHITE
-        canvas.drawCircle(32f, 32f, 4f, paint)
+        canvas.drawCircle(32f, 32f, 5f, paint)
         return IconFactory.getInstance(context).fromBitmap(bitmap)
     }
 
@@ -174,22 +218,4 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
     fun onDestroy() = mapView.onDestroy()
     fun onLowMemory() = mapView.onLowMemory()
     fun onSaveInstanceState(outState: android.os.Bundle) = mapView.onSaveInstanceState(outState)
-
-    private fun styleJson(): String = """
-        {
-          "version": 8,
-          "name": "OpenStreetMap raster",
-          "sources": {
-            "osm": {
-              "type": "raster",
-              "tiles": ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-              "tileSize": 256,
-              "attribution": "© OpenStreetMap contributors"
-            }
-          },
-          "layers": [
-            {"id": "osm-raster", "type": "raster", "source": "osm", "minzoom": 0, "maxzoom": 19}
-          ]
-        }
-    """.trimIndent()
 }
