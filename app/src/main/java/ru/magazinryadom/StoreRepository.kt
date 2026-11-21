@@ -456,17 +456,54 @@ object StoreRepository {
     }
 
     /** Пеший маршрут: основной OSRM-сервис и независимый резерв Valhalla. */
+    /** Пеший маршрут: BRouter (hiking), затем OSRM foot и Valhalla pedestrian. */
     fun walkingRoute(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): List<Pair<Double, Double>> {
         require(fromLat.isFinite() && fromLon.isFinite() && toLat.isFinite() && toLon.isFinite()) { "Некорректные координаты маршрута." }
         require(fromLat in -90.0..90.0 && toLat in -90.0..90.0 && fromLon in -180.0..180.0 && toLon in -180.0..180.0) { "Координаты маршрута вне допустимого диапазона." }
+
+        var brouterError: Exception? = null
+        try {
+            val waypoints = URLEncoder.encode("$fromLon,$fromLat|$toLon,$toLat", "UTF-8")
+            val url = "https://brouter.de/brouter?lonlats=$waypoints&profile=hiking-beta&alternativeidx=0&format=geojson"
+            val connection = URL(url).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = 6500
+                connection.readTimeout = 10000
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("User-Agent", USER_AGENT)
+                connection.setRequestProperty("Accept", "application/geo+json, application/json")
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                if (code !in 200..299) throw Exception("BRouter HTTP $code")
+                val response = JSONObject(body)
+                val geometry = response.optJSONObject("geometry")
+                    ?: response.optJSONArray("features")?.optJSONObject(0)?.optJSONObject("geometry")
+                val coords = geometry?.optJSONArray("coordinates")
+                    ?: throw Exception("BRouter не вернул геометрию")
+                val points = (0 until coords.length()).mapNotNull { index ->
+                    val pair = coords.optJSONArray(index) ?: return@mapNotNull null
+                    if (pair.length() < 2) return@mapNotNull null
+                    val lon = pair.optDouble(0, Double.NaN)
+                    val lat = pair.optDouble(1, Double.NaN)
+                    if (lat.isFinite() && lon.isFinite()) lat to lon else null
+                }
+                if (points.size >= 2) return points
+                throw Exception("BRouter вернул слишком мало точек")
+            } finally {
+                connection.disconnect()
+            }
+        } catch (e: Exception) {
+            brouterError = e
+        }
 
         var primaryError: Exception? = null
         val osrmUrl = "https://routing.openstreetmap.de/routed-foot/route/v1/driving/$fromLon,$fromLat;$toLon,$toLat?overview=full&geometries=geojson&steps=false"
         try {
             val connection = URL(osrmUrl).openConnection() as HttpURLConnection
             try {
-                connection.connectTimeout = 10000
-                connection.readTimeout = 16000
+                connection.connectTimeout = 6500
+                connection.readTimeout = 10000
                 connection.requestMethod = "GET"
                 connection.instanceFollowRedirects = true
                 connection.setRequestProperty("User-Agent", USER_AGENT)
@@ -497,8 +534,6 @@ object StoreRepository {
             primaryError = e
         }
 
-        // Резервный независимый движок маршрутизации. Публичный сервер FOSSGIS
-        // поддерживает pedestrian costing и GeoJSON-геометрию.
         try {
             val payload = JSONObject().apply {
                 put("locations", JSONArray().apply {
@@ -513,8 +548,8 @@ object StoreRepository {
             }
             val connection = URL("https://valhalla1.openstreetmap.de/route").openConnection() as HttpURLConnection
             try {
-                connection.connectTimeout = 12000
-                connection.readTimeout = 20000
+                connection.connectTimeout = 7500
+                connection.readTimeout = 12000
                 connection.requestMethod = "POST"
                 connection.doOutput = true
                 connection.setRequestProperty("User-Agent", USER_AGENT)
@@ -553,8 +588,11 @@ object StoreRepository {
                 connection.disconnect()
             }
         } catch (fallbackError: Exception) {
-            val primary = primaryError?.message ?: "основной сервис недоступен"
-            throw Exception("Не удалось загрузить линию маршрута. OSRM: $primary. Резервный сервис: ${fallbackError.message ?: "ошибка подключения"}.", fallbackError)
+            throw Exception(
+                "Не удалось загрузить линию маршрута. BRouter: ${brouterError?.message ?: "ошибка"}. " +
+                    "OSRM: ${primaryError?.message ?: "ошибка"}. Valhalla: ${fallbackError.message ?: "ошибка подключения"}.",
+                fallbackError
+            )
         }
     }
 
