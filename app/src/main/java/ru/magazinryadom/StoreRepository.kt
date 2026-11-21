@@ -30,6 +30,8 @@ object StoreRepository {
     private val networkAliases = mapOf(
         "пятерочка" to listOf("Пятёрочка", "Пятерочка"),
         "магнит" to listOf("Магнит", "Magnit"),
+        "магнит косметик" to listOf("Магнит Косметик", "Магнит Косметик"),
+        "магнит аптека" to listOf("Магнит Аптека"),
         "перекресток" to listOf("Перекрёсток", "Перекресток", "Perekrestok"),
         "дикси" to listOf("Дикси", "Dixy"),
         "лента" to listOf("Лента", "Lenta"),
@@ -42,6 +44,31 @@ object StoreRepository {
         "окей" to listOf("О'КЕЙ", "Окей", "Okey"),
         "метро" to listOf("METRO", "Метро"),
         "самокат" to listOf("Самокат", "Samokat"),
+        "спортмастер" to listOf("Спортмастер", "Sportmaster"),
+        "детский мир" to listOf("Детский мир", "Детский Мир", "Detsky Mir"),
+        "fix price" to listOf("Fix Price", "Фикс Прайс"),
+        "фикс прайс" to listOf("Fix Price", "Фикс Прайс"),
+        "dns" to listOf("DNS", "ДНС"),
+        "м видео" to listOf("М.Видео", "М Видео", "M.Video"),
+        "эльдорадо" to listOf("Эльдорадо", "Eldorado"),
+        "золотое яблоко" to listOf("Золотое Яблоко", "Gold Apple"),
+        "подружка" to listOf("Подружка", "Podruzhka"),
+        "леруа мерлен" to listOf("Лемана ПРО", "Леруа Мерлен", "Leroy Merlin"),
+        "лемана про" to listOf("Лемана ПРО", "Леруа Мерлен", "Leroy Merlin"),
+        "obi" to listOf("OBI", "ОБИ"),
+        "петрович" to listOf("Петрович", "Petrovich"),
+        "максидом" to listOf("Максидом", "Maxidom"),
+        "касторама" to listOf("Castorama", "Касторама"),
+        "яндекс лавка" to listOf("Яндекс Лавка", "Yandex Lavka"),
+        "вкусно и точка" to listOf("Вкусно — и точка", "Вкусно и точка"),
+        "бургер кинг" to listOf("Бургер Кинг", "Burger King"),
+        "вкусно и точка" to listOf("Вкусно — и точка", "Вкусно и точка"),
+        "ростикс" to listOf("Rostic's", "Ростикс", "KFC"),
+        "теремок" to listOf("Теремок", "Teremok"),
+        "перекресток экспресс" to listOf("Перекрёсток Экспресс", "Перекресток Экспресс"),
+        "горздрав" to listOf("Горздрав", "Gorzdrav"),
+        "ригла" to listOf("Ригла", "Rigla"),
+        "36 6" to listOf("36,6", "36.6"),
         "аптека" to listOf("аптека", "pharmacy")
     )
 
@@ -115,12 +142,16 @@ object StoreRepository {
         } else emptyList()
 
         val combined = (osmResults + photonResults + fallbackResults + local)
-            .filter { it.distance.isFinite() && it.distance <= SEARCH_RADIUS }
+            .filter { it.lat.isFinite() && it.lon.isFinite() && it.lat in -90.0..90.0 && it.lon in -180.0..180.0 }
             .filterNot { isRestrictedStore(it) }
             .distinctBy {
                 "${String.format(Locale.US, "%.5f", it.lat)},${String.format(Locale.US, "%.5f", it.lon)}"
             }
-            .sortedBy { it.distance }
+            // Recalculate every candidate from the exact GPS coordinates used for this search.
+            // Do not trust distance values cached by an upstream provider or custom-point record.
+            .map { it.copy(distance = distance(lat, lon, it.lat, it.lon)) }
+            .filter { it.distance.isFinite() && it.distance <= SEARCH_RADIUS }
+            .sortedWith(compareBy<Store> { it.distance }.thenBy { it.name.lowercase(Locale.ROOT) })
             .take(MAX_RESULTS)
 
         if (combined.isNotEmpty()) return combined
