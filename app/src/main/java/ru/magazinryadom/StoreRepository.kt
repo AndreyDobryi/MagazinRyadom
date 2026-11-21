@@ -17,8 +17,8 @@ import kotlin.math.sqrt
 object StoreRepository {
     private const val PHOTON = "https://photon.komoot.io/api/"
     private const val USER_AGENT = "MagazinRyadom/1.8.4 (Android; OpenStreetMap client)"
-    private const val SEARCH_RADIUS = 6000.0
-    private const val MAX_RESULTS = 50
+    private const val SEARCH_RADIUS = 12000.0
+    private const val MAX_RESULTS = 100
     // Prefer the VK Maps / Mail.ru public Overpass instance, which explicitly
     // welcomes app usage. Keep other instances as sequential fallbacks only.
     private val overpassEndpoints = listOf(
@@ -326,13 +326,14 @@ object StoreRepository {
         }
 
         var lastError: Exception? = null
-        var emptyResponseReceived = false
+        var successfulResponseReceived = false
         val endpointErrors = mutableListOf<String>()
+        val allFound = mutableListOf<Store>()
         for (endpoint in overpassEndpoints) {
             val connection = URL(endpoint).openConnection() as HttpURLConnection
             try {
                 connection.connectTimeout = 6000
-                connection.readTimeout = 12000
+                connection.readTimeout = 28000
                 connection.requestMethod = "POST"
                 connection.doOutput = true
                 connection.setRequestProperty("User-Agent", USER_AGENT)
@@ -350,7 +351,7 @@ object StoreRepository {
                     throw Exception(label)
                 }
                 val elements = JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optJSONArray("elements") ?: JSONArray()
-                val found = mutableListOf<Store>()
+                successfulResponseReceived = true
                 for (i in 0 until elements.length()) {
                     val element = elements.optJSONObject(i) ?: continue
                     val tags = element.optJSONObject("tags") ?: continue
@@ -365,18 +366,15 @@ object StoreRepository {
                         tags.optString("addr:city"), tags.optString("addr:street"), tags.optString("addr:housenumber")
                     ).filter { it.isNotBlank() }.joinToString(", ").ifBlank { "Адрес уточняется по карте" }
                     val distance = distance(lat, lon, itemLat, itemLon)
-                    if (distance <= radius) found += Store(name, address, itemLat, itemLon, distance)
+                    if (distance <= radius) allFound += Store(name, address, itemLat, itemLon, distance)
                 }
-                if (found.isNotEmpty()) return found
-                // Один рабочий узел может иметь пустой/неполный ответ;
-                // проверяем следующий зеркальный узел перед выводом «не найдено».
-                emptyResponseReceived = true
+                // Объединяем ответы всех доступных зеркал: первое зеркало может быть неполным.
             } catch (e: Exception) {
                 lastError = e
                 endpointErrors += "${endpoint.substringAfter("https://").substringBefore("/")}: ${e.message ?: "ошибка подключения"}"
             } finally { connection.disconnect() }
         }
-        if (emptyResponseReceived) return emptyList()
+        if (successfulResponseReceived) return allFound.distinctBy { String.format(Locale.US, "%.5f,%.5f", it.lat, it.lon) }.sortedBy { it.distance }
         val detail = endpointErrors.distinct().joinToString("; ")
         throw Exception(
             if (detail.isBlank()) "Не удалось получить ответ от серверов поиска магазинов. Попробуй позже."
