@@ -33,6 +33,8 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
     private var recenterButton: TextView? = null
     private var map: MapLibreMap? = null
     private var styleReady = false
+    private var fallbackStyleUsed = false
+    private var mapErrorLabel: TextView? = null
     private var pendingUser: LatLng? = null
     private var pendingStores: List<Store> = emptyList()
     private var pendingRoute: List<Pair<Double, Double>> = emptyList()
@@ -50,6 +52,17 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
             (360 * context.resources.displayMetrics.density).toInt()
         )
         mapView = MapView(context)
+        mapView.setBackgroundColor(Color.rgb(232, 235, 230))
+        mapErrorLabel = TextView(context).apply {
+            text = "Загружаем карту…"
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(80, 88, 96))
+            setBackgroundColor(Color.rgb(232, 235, 230))
+        }
+        view.addView(mapErrorLabel, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
         // Keep map gestures inside the MapView instead of the surrounding ScrollView.
         mapView.setOnTouchListener { _, event ->
             when (event.actionMasked) {
@@ -128,7 +141,8 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
             mapboxMap.uiSettings.isScrollGesturesEnabled = true
             mapboxMap.uiSettings.isZoomGesturesEnabled = true
             // Keep north at the top so the map is easier to read while navigating.
-            mapboxMap.uiSettings.isRotateGesturesEnabled = false
+            // Two-finger twist rotates the map; compass returns it to north.
+            mapboxMap.uiSettings.isRotateGesturesEnabled = true
             mapboxMap.uiSettings.isTiltGesturesEnabled = false
             mapboxMap.uiSettings.isCompassEnabled = true
             mapboxMap.uiSettings.isLogoEnabled = true
@@ -147,12 +161,53 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
                     true
                 } else false
             }
-            mapboxMap.setStyle(Style.Builder().fromUri("https://tiles.openfreemap.org/styles/bright")) {
+            mapView.addOnDidFailLoadingMapListener { errorMessage ->
+                if (!fallbackStyleUsed) {
+                    fallbackStyleUsed = true
+                    mapboxMap.setStyle(Style.Builder().fromJson(rasterStyle("https://tile.openstreetmap.de/{z}/{x}/{y}.png"))) {
+                        styleReady = true
+                        mapErrorLabel?.visibility = View.GONE
+                        renderPending()
+                    }
+                } else if (!styleReady) {
+                    mapErrorLabel?.apply {
+                        visibility = View.VISIBLE
+                        text = "Карта временно недоступна. Проверь интернет и нажми GPS, чтобы повторить."
+                    }
+                }
+            }
+            // Use the same OpenStreetMap raster tiles in the app and home-screen snapshot.
+            mapboxMap.setStyle(Style.Builder().fromJson(rasterStyle("https://tile.openstreetmap.org/{z}/{x}/{y}.png"))) {
                 styleReady = true
+                mapErrorLabel?.visibility = View.GONE
                 renderPending()
             }
         }
     }
+
+    private fun rasterStyle(tileTemplate: String): String = """
+        {
+          "version": 8,
+          "name": "OpenStreetMap",
+          "sources": {
+            "osm-raster": {
+              "type": "raster",
+              "tiles": ["$tileTemplate"],
+              "tileSize": 256,
+              "attribution": "© OpenStreetMap contributors"
+            }
+          },
+          "layers": [
+            {
+              "id": "osm-raster-layer",
+              "type": "raster",
+              "source": "osm-raster",
+              "minzoom": 0,
+              "maxzoom": 19
+            }
+          ]
+        }
+    """.trimIndent()
 
     fun pickPointOnce(listener: (Double, Double) -> Unit) { pointPickListener = listener }
     fun cancelPointPick() { pointPickListener = null }
