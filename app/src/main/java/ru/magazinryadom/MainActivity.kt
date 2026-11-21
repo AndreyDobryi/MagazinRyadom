@@ -470,9 +470,13 @@ class MainActivity : Activity() {
         routeButton.isEnabled = true
         info.text = "Сохраняем выбранный магазин…"
         executor.execute {
+            var routeFailure: String? = null
             val walkingPath = try {
                 StoreRepository.walkingRoute(location.latitude, location.longitude, store.lat, store.lon)
-            } catch (_: Exception) { emptyList() }
+            } catch (e: Exception) {
+                routeFailure = e.message ?: "Неизвестная ошибка сервиса маршрутов"
+                emptyList()
+            }
             val imageFile = File(cacheDir, "widget-map.png")
             imageFile.delete()
             val bitmap = MapTile.make(location.latitude, location.longitude, store.lat, store.lon, walkingPath)
@@ -508,7 +512,7 @@ class MainActivity : Activity() {
                 info.text = if (walkingPath.size >= 2) {
                     "Ближайшая точка: ${store.name}. Пешком ${formatDistance(pathLength(walkingPath))} · около ${kotlin.math.ceil(pathLength(walkingPath) / 80.0).toInt()} мин. Зелёная линия — маршрут."
                 } else {
-                    "Выбрана точка: ${store.name}. Не удалось загрузить линию маршрута; попробуй открыть навигацию."
+                    "Магазин выбран: ${store.name}. Линия маршрута не загрузилась: ${routeFailure ?: "сервис временно недоступен"}. Можно открыть маршрут в навигаторе."
                 }
             }
         }
