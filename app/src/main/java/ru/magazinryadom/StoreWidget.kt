@@ -25,6 +25,15 @@ class StoreWidget : AppWidgetProvider() {
                     R.id.widget_network,
                     if (network.isBlank()) "Выбери сеть в приложении" else network
                 )
+                val storeName = prefs.getString("name", "").orEmpty()
+                val address = prefs.getString("address", "").orEmpty()
+                val distance = prefs.getString("distance", "").orEmpty()
+                val details = when {
+                    storeName.isBlank() -> "Ближайший магазин ещё не выбран"
+                    address.isBlank() && distance.isBlank() -> storeName
+                    else -> listOf(storeName, address, distance).filter { it.isNotBlank() }.joinToString(" · ")
+                }
+                views.setTextViewText(R.id.widget_store_details, details)
 
                 val mapPath = prefs.getString("map", null)
                 val mapBitmap = mapPath?.let { BitmapFactory.decodeFile(it) }
