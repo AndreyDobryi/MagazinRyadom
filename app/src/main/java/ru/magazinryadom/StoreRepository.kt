@@ -62,7 +62,6 @@ object StoreRepository {
         "яндекс лавка" to listOf("Яндекс Лавка", "Yandex Lavka"),
         "вкусно и точка" to listOf("Вкусно — и точка", "Вкусно и точка"),
         "бургер кинг" to listOf("Бургер Кинг", "Burger King"),
-        "вкусно и точка" to listOf("Вкусно — и точка", "Вкусно и точка"),
         "ростикс" to listOf("Rostic's", "Ростикс", "KFC"),
         "теремок" to listOf("Теремок", "Teremok"),
         "перекресток экспресс" to listOf("Перекрёсток Экспресс", "Перекресток Экспресс"),
@@ -295,11 +294,11 @@ object StoreRepository {
             """
                 [out:json][timeout:22];
                 (
-                  nwr(around:$radius,$lat,$lon)["shop"~"supermarket|convenience|department_store|general|greengrocer|discount|wholesale|cash_and_carry",i]["brand"~"$regex",i];
-                  nwr(around:$radius,$lat,$lon)["shop"~"supermarket|convenience|department_store|general|greengrocer|discount|wholesale|cash_and_carry",i]["brand:ru"~"$regex",i];
-                  nwr(around:$radius,$lat,$lon)["shop"~"supermarket|convenience|department_store|general|greengrocer|discount|wholesale|cash_and_carry",i]["operator"~"$regex",i];
-                  nwr(around:$radius,$lat,$lon)["shop"~"supermarket|convenience|department_store|general|greengrocer|discount|wholesale|cash_and_carry",i]["name"~"$regex",i];
-                  nwr(around:$radius,$lat,$lon)["shop"]["name:ru"~"$regex",i];
+                  nwr(around:$radius,$lat,$lon)["brand"~"$regex",i];
+                  nwr(around:$radius,$lat,$lon)["brand:ru"~"$regex",i];
+                  nwr(around:$radius,$lat,$lon)["operator"~"$regex",i];
+                  nwr(around:$radius,$lat,$lon)["name"~"$regex",i];
+                  nwr(around:$radius,$lat,$lon)["name:ru"~"$regex",i];
                 );
                 out center tags;
             """.trimIndent()
