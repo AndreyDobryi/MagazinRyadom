@@ -27,6 +27,7 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
     private val mapView: MapView
     private var followUser = true
     private var cameraInitialized = false
+    private var routeFramed = false
     private var recenterButton: TextView? = null
     private var map: MapLibreMap? = null
     private var styleReady = false
@@ -133,25 +134,21 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
             storeMarkerIcon?.let { marker.icon(it) }
             activeMap.addMarker(marker)
         }
-        if (!cameraInitialized) {
-            val target = pendingStores.firstOrNull()?.let { LatLng(it.lat, it.lon) } ?: user
-            if (pendingRoute.size >= 2) {
-                try {
-                    val bounds = org.maplibre.android.geometry.LatLngBounds.Builder().apply {
-                        include(user)
-                        pendingRoute.forEach { include(LatLng(it.first, it.second)) }
-                        pendingStores.firstOrNull()?.let { include(LatLng(it.lat, it.lon)) }
-                    }.build()
-                    activeMap.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 56))
-                } catch (_: Exception) {
-                    activeMap.setCameraPosition(CameraPosition.Builder().target(target).zoom(15.0).build())
-                }
-            } else {
-                activeMap.setCameraPosition(CameraPosition.Builder()
-                    .target(user)
-                    .zoom(16.0)
-                    .build())
+        if (pendingRoute.size >= 2 && !routeFramed) {
+            try {
+                val bounds = org.maplibre.android.geometry.LatLngBounds.Builder().apply {
+                    include(user)
+                    pendingRoute.forEach { include(LatLng(it.first, it.second)) }
+                    pendingStores.firstOrNull()?.let { include(LatLng(it.lat, it.lon)) }
+                }.build()
+                activeMap.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 56))
+            } catch (_: Exception) {
+                activeMap.animateCamera(CameraUpdateFactory.newLatLngZoom(user, 15.0))
             }
+            routeFramed = true
+            cameraInitialized = true
+        } else if (!cameraInitialized) {
+            activeMap.setCameraPosition(CameraPosition.Builder().target(user).zoom(16.0).build())
             cameraInitialized = true
         } else if (followUser) {
             val zoom = activeMap.cameraPosition.zoom.coerceAtLeast(15.0)
