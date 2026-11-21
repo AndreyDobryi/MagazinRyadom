@@ -78,44 +78,34 @@ object StoreRepository {
             "Местоположение не определено. Обнови GPS или задай точку вручную."
         }
 
-        // Логика ранних версий: сначала ищем точки рядом, затем сами считаем
-        // расстояние и выбираем ближайшие. Photon пробуем первым, чтобы поиск
-        // не зависел от доступности публичных Overpass-серверов.
+        // Пользовательские точки остаются дополнительным источником, но не заменяют поиск филиалов сети.
         val local = custom(ctx, lat, lon)
             .filter { matchesQuery(it, query) && it.distance <= SEARCH_RADIUS }
 
-        val photonResults = mutableListOf<Store>()
-        val photonErrors = mutableListOf<String>()
-        var photonResponded = false
-        for (alias in aliasesFor(query)) {
-            try {
-                val result = photonSearch(alias, lat, lon, MAX_RESULTS)
-                photonResponded = true
-                photonResults += result.filter {
-                    it.distance <= SEARCH_RADIUS && matchesQuery(it, query)
-                }
-            } catch (e: Exception) {
-                photonErrors += (e.message ?: "Photon: ошибка подключения")
-            }
-            if (photonResults.isNotEmpty()) break
-        }
-
-        // Если Photon не нашёл ближайшую точку, используем точный локальный
-        // запрос OSM. Ошибка одного источника не отменяет попытку другого.
+        // Overpass — основной источник именно объектов OSM. Photon не используем
+        // как каталог филиалов: это геокодер, его выдача может быть неполной.
         var osmResponded = false
         var osmError: String? = null
-        val osmResults = if (photonResults.isEmpty()) {
+        val osmResults = try {
+            overpassSearch(query, lat, lon, SEARCH_RADIUS.toInt()).also { osmResponded = true }
+        } catch (e: Exception) {
+            osmError = e.message ?: "Overpass: ошибка подключения"
+            emptyList()
+        }
+
+        // Резервный поиск по POI через Nominatim нужен только если Overpass
+        // вернул пусто или временно недоступен.
+        var nominatimError: String? = null
+        val fallbackResults = if (osmResults.isEmpty()) {
             try {
-                val found = overpassSearch(query, lat, lon, SEARCH_RADIUS.toInt())
-                osmResponded = true
-                found
+                nominatimSearch(query, lat, lon)
             } catch (e: Exception) {
-                osmError = e.message
+                nominatimError = e.message ?: "Nominatim: ошибка подключения"
                 emptyList()
             }
         } else emptyList()
 
-        val combined = (photonResults + osmResults + local)
+        val combined = (osmResults + fallbackResults + local)
             .filter { it.distance.isFinite() && it.distance <= SEARCH_RADIUS }
             .filterNot { isRestrictedStore(it) }
             .distinctBy {
@@ -126,14 +116,12 @@ object StoreRepository {
 
         if (combined.isNotEmpty()) return combined
 
-        // Пустая выдача от работающих серверов — это «ничего не найдено»,
-        // а не сетевая ошибка. Ошибку показываем только если оба источника
-        // действительно не ответили и нет сохранённых пользователем точек.
-        if (photonResults.isEmpty() && !osmResponded && local.isEmpty()) {
-            val photonStatus = if (photonResponded) "Photon: сервер ответил, но ближайшие точки не вернул" else null
-            val details = (photonErrors + listOfNotNull(photonStatus, osmError ?: "Overpass: серверы не ответили"))
-                .filter { it.isNotBlank() }.distinct().joinToString("; ")
-            throw Exception("Сервисы поиска временно недоступны. Причины: $details")
+        if (!osmResponded && osmResults.isEmpty() && fallbackResults.isEmpty() && local.isEmpty()) {
+            val details = listOfNotNull(osmError, nominatimError).distinct().joinToString("; ")
+            throw Exception(
+                if (details.isBlank()) "Сервисы поиска магазинов временно недоступны. Попробуй ещё раз."
+                else "Поиск магазинов временно недоступен. Причины: $details"
+            )
         }
         return emptyList()
     }
@@ -162,6 +150,53 @@ object StoreRepository {
         val name = normalize(store.name)
         return listOf("красное и белое", "красное белое", "алкомаркет", "алкогольный магазин")
             .any { name.contains(normalize(it)) }
+    }
+
+    /**
+     * Ограниченный резервный поиск POI. Выполняется один запрос на действие
+     * пользователя, только если Overpass не вернул филиалы.
+     */
+    private fun nominatimSearch(query: String, lat: Double, lon: Double): List<Store> {
+        val latDelta = SEARCH_RADIUS / 111320.0
+        val lonScale = kotlin.math.cos(Math.toRadians(lat)).coerceAtLeast(0.15)
+        val lonDelta = SEARCH_RADIUS / (111320.0 * lonScale)
+        val left = lon - lonDelta
+        val right = lon + lonDelta
+        val top = lat + latDelta
+        val bottom = lat - latDelta
+        val encoded = URLEncoder.encode(aliasesFor(query).first(), "UTF-8")
+        val url = "https://nominatim.openstreetmap.org/search?q=$encoded&format=jsonv2&limit=50" +
+            "&viewbox=$left,$top,$right,$bottom&bounded=1&addressdetails=1&accept-language=ru"
+        val connection = URL(url).openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = 8000
+            connection.readTimeout = 15000
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("User-Agent", USER_AGENT)
+            connection.setRequestProperty("Accept", "application/json")
+            val code = connection.responseCode
+            if (code !in 200..299) throw Exception("Nominatim HTTP $code")
+            val items = JSONArray(connection.inputStream.bufferedReader().use { it.readText() })
+            val found = mutableListOf<Store>()
+            for (i in 0 until items.length()) {
+                val item = items.optJSONObject(i) ?: continue
+                val itemLat = item.optString("lat").toDoubleOrNull() ?: continue
+                val itemLon = item.optString("lon").toDoubleOrNull() ?: continue
+                if (!itemLat.isFinite() || !itemLon.isFinite()) continue
+                val display = item.optString("display_name")
+                val name = item.optString("name").ifBlank { display.substringBefore(",").trim() }
+                if (name.isBlank()) continue
+                val address = display.ifBlank { "Адрес не указан" }
+                val distance = distance(lat, lon, itemLat, itemLon)
+                val candidate = Store(name, address, itemLat, itemLon, distance)
+                if (distance <= SEARCH_RADIUS && matchesQuery(candidate, query) && !isRestrictedStore(candidate)) {
+                    found += candidate
+                }
+            }
+            return found.sortedBy { it.distance }
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun photonSearch(query: String, lat: Double?, lon: Double?, limit: Int): List<Store> {
@@ -231,6 +266,7 @@ object StoreRepository {
         }
 
         var lastError: Exception? = null
+        var emptyResponseReceived = false
         val endpointErrors = mutableListOf<String>()
         for (endpoint in overpassEndpoints) {
             val connection = URL(endpoint).openConnection() as HttpURLConnection
@@ -271,12 +307,16 @@ object StoreRepository {
                     val distance = distance(lat, lon, itemLat, itemLon)
                     if (distance <= radius) found += Store(name, address, itemLat, itemLon, distance)
                 }
-                return found
+                if (found.isNotEmpty()) return found
+                // Один рабочий узел может иметь пустой/неполный ответ;
+                // проверяем следующий зеркальный узел перед выводом «не найдено».
+                emptyResponseReceived = true
             } catch (e: Exception) {
                 lastError = e
                 endpointErrors += "${endpoint.substringAfter("https://").substringBefore("/")}: ${e.message ?: "ошибка подключения"}"
             } finally { connection.disconnect() }
         }
+        if (emptyResponseReceived) return emptyList()
         val detail = endpointErrors.distinct().joinToString("; ")
         throw Exception(
             if (detail.isBlank()) "Не удалось получить ответ от серверов поиска магазинов. Попробуй позже."
