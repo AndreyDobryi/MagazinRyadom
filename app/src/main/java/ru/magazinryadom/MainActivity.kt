@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.net.Uri
 import android.os.Bundle
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
@@ -60,7 +61,7 @@ class MainActivity : Activity() {
             if (manualLocationMode) return
             // Reject obviously old fixes; never move the map back to a cached airport coordinate.
             val age = System.currentTimeMillis() - fresh.time
-            if (age > 45_000L || age < -15_000L || fresh.accuracy > 100f) return
+            if (age > 45_000L || age < -15_000L || fresh.accuracy > 100f || isMockLocation(fresh)) return
             if (isGpsJump(fresh)) {
                 info.text = "GPS выдал скачок координат. Игнорируем эту точку и ждём подтверждения реального местоположения."
                 return
@@ -696,10 +697,10 @@ class MainActivity : Activity() {
             requestLocationPermission()
             return
         }
-        info.text = "Получаем свежее местоположение от GPS…"
+        info.text = "Определяем местоположение через Wi-Fi и мобильную сеть…"
         try {
             val request = CurrentLocationRequest.Builder()
-                .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+                .setPriority(Priority.PRIORITY_BALANCED_POWER_ACCURACY)
                 .setMaxUpdateAgeMillis(0L)
                 .setDurationMillis(25000L)
                 .build()
@@ -709,8 +710,8 @@ class MainActivity : Activity() {
                         useSavedManualLocationOrWait("Телефон пока не получил GPS. Проверь геолокацию или задай точку вручную.")
                     } else {
                         val age = System.currentTimeMillis() - location.time
-                        if (age > 45000L || age < -15000L || location.accuracy > 100f || isGpsJump(location)) {
-                            useSavedManualLocationOrWait("GPS пока неточный или координаты резко изменились. Ждём подтверждения корректного местоположения.")
+                        if (age > 45000L || age < -15000L || location.accuracy > 100f || isMockLocation(location) || isGpsJump(location)) {
+                            useSavedManualLocationOrWait("Сетевое местоположение пока неточное или координаты подозрительные. Ждём более надёжную точку; можно указать место вручную.")
                             startLiveLocation()
                         } else {
                             getSharedPreferences("manual_location", MODE_PRIVATE).edit().clear().apply()
@@ -740,6 +741,9 @@ class MainActivity : Activity() {
      * single bad fused/network location (for example, a distant airport) from
      * replacing a stable position and rebuilding the route there.
      */
+    private fun isMockLocation(location: Location): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && location.isMock
+
     private fun isGpsJump(location: Location): Boolean {
         val prefs = getSharedPreferences("chosen", MODE_PRIVATE)
         val oldLat = prefs.getString("gps_lat", null)?.toDoubleOrNull() ?: return false
