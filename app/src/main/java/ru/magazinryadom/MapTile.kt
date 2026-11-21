@@ -90,17 +90,17 @@ object MapTile {
                                     result.set(bitmap)
                                     latch.countDown()
                                 } catch (_: Exception) {
-                                    if (index + 1 < styleUrls.size) startStyleAttempt(index + 1)
+                                    if (index + 1 < styleUrls.size) Handler(Looper.getMainLooper()).post { startStyleAttempt(index + 1) }
                                     else latch.countDown()
                                 }
                             },
                             {
-                                if (index + 1 < styleUrls.size) startStyleAttempt(index + 1)
+                                if (index + 1 < styleUrls.size) Handler(Looper.getMainLooper()).post { startStyleAttempt(index + 1) }
                                 else latch.countDown()
                             }
                         )
                     } catch (_: Exception) {
-                        if (index + 1 < styleUrls.size) startStyleAttempt(index + 1)
+                        if (index + 1 < styleUrls.size) Handler(Looper.getMainLooper()).post { startStyleAttempt(index + 1) }
                         else latch.countDown()
                     }
                 }
