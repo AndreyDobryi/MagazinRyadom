@@ -6,7 +6,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
     <application
-        android:icon="@drawable/ic_launcher"
+        android:icon="@drawable/ic_launcher_photo"
         android:allowBackup="true"
         android:label="Магазин рядом"
         android:theme="@style/AppTheme"
