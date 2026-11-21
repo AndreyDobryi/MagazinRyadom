@@ -62,7 +62,7 @@ class MainActivity : Activity() {
             if (manualLocationMode) return
             // Reject obviously old fixes; never move the map back to a cached airport coordinate.
             val age = System.currentTimeMillis() - fresh.time
-            if (age > 45_000L || age < -15_000L || fresh.accuracy > 100f || isMockLocation(fresh)) return
+            if (age > 45_000L || age < -15_000L || fresh.accuracy > 40f || isMockLocation(fresh)) return
             if (isGpsJump(fresh)) {
                 info.text = "GPS выдал скачок координат. Игнорируем эту точку и ждём подтверждения реального местоположения."
                 return
@@ -432,7 +432,7 @@ class MainActivity : Activity() {
             .apply()
         StoreWidget.update(this)
         suggestions.removeAllViews()
-        info.text = "Ищем филиалы сети «$query» в радиусе 10 км…"
+        info.text = "Ищем филиалы сети «$query» в радиусе 3 км…"
         results.removeAllViews()
         results.addView(TextView(this).apply {
             text = "Ищем филиалы по бренду и названию. Это может занять несколько секунд."
@@ -451,7 +451,7 @@ class MainActivity : Activity() {
                     if (requestId != searchGeneration) return@runOnUiThread
                     results.removeAllViews()
                     if (nearestFirst.isEmpty()) {
-                        info.text = "В радиусе 10 км филиалы «$query» не найдены. Попробуй другое написание или обнови GPS."
+                        info.text = "В радиусе 3 км филиалы «$query» не найдены. Попробуй другое написание или обнови GPS."
                         mapPage.show(location.latitude, location.longitude, emptyList())
                     } else {
                         info.text = "Найдено филиалов: ${nearestFirst.size}. Выбран ближайший — ${nearestFirst.first().name} (${formatDistance(nearestFirst.first().distance)} от тебя). На экране показаны ближайшие 10."
@@ -766,7 +766,7 @@ class MainActivity : Activity() {
         info.text = "Определяем местоположение через Wi-Fi и мобильную сеть…"
         try {
             val request = CurrentLocationRequest.Builder()
-                .setPriority(Priority.PRIORITY_BALANCED_POWER_ACCURACY)
+                .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
                 .setMaxUpdateAgeMillis(0L)
                 .setDurationMillis(25000L)
                 .build()
@@ -776,7 +776,7 @@ class MainActivity : Activity() {
                         useSavedManualLocationOrWait("Телефон пока не получил GPS. Проверь геолокацию или задай точку вручную.")
                     } else {
                         val age = System.currentTimeMillis() - location.time
-                        if (age > 45000L || age < -15000L || location.accuracy > 100f || isMockLocation(location) || isGpsJump(location)) {
+                        if (age > 45000L || age < -15000L || location.accuracy > 40f || isMockLocation(location) || isGpsJump(location)) {
                             useSavedManualLocationOrWait("Сетевое местоположение пока неточное или координаты подозрительные. Ждём более надёжную точку; можно указать место вручную.")
                             startLiveLocation()
                         } else {
@@ -822,7 +822,7 @@ class MainActivity : Activity() {
             longitude = oldLon
         }
         val moved = old.distanceTo(location).toDouble()
-        val allowed = 1500.0 + (elapsed / 1000.0) * 45.0 +
+        val allowed = 250.0 + (elapsed / 1000.0) * 55.0 +
             location.accuracy.coerceAtLeast(0f) * 2.0
         return moved > allowed
     }
