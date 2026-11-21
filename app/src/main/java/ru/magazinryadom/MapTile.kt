@@ -52,7 +52,8 @@ object MapTile {
             val centerTileY = floor(centerY / 256.0).toInt()
             val bitmap = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
-            canvas.drawColor(Color.rgb(35, 39, 45))
+            // Match the light OSM map used by the interactive MapLibre screen.
+            canvas.drawColor(Color.rgb(232, 235, 230))
             val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
             val maxTile = 1 shl zoom
 
@@ -115,21 +116,31 @@ object MapTile {
                 return cached.copy(Bitmap.Config.ARGB_8888, false)
             }
         }
-        val connection = URL("https://tile.openstreetmap.org/$z/$x/$y.png")
-            .openConnection() as HttpURLConnection
-        return try {
-            connection.connectTimeout = 5000
-            connection.readTimeout = 7000
-            connection.setRequestProperty("User-Agent", "MagazinRyadom/1.8.2 (Android)")
-            if (connection.responseCode !in 200..299) null
-            else {
-                val decoded = connection.inputStream.use { BitmapFactory.decodeStream(it) } ?: return null
-                synchronized(tileCache) { tileCache.put(key, decoded) }
-                decoded.copy(Bitmap.Config.ARGB_8888, false)
+        val hosts = listOf(
+            "https://tile.openstreetmap.org/$z/$x/$y.png",
+            "https://tile.openstreetmap.de/$z/$x/$y.png"
+        )
+        for (tileUrl in hosts) {
+            val connection = URL(tileUrl).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = 3500
+                connection.readTimeout = 5000
+                connection.setRequestProperty("User-Agent", "MagazinRyadom/1.9.1 (Android; OpenStreetMap client)")
+                connection.setRequestProperty("Accept", "image/png,image/*")
+                if (connection.responseCode in 200..299) {
+                    val decoded = connection.inputStream.use { BitmapFactory.decodeStream(it) }
+                    if (decoded != null) {
+                        synchronized(tileCache) { tileCache.put(key, decoded) }
+                        return decoded.copy(Bitmap.Config.ARGB_8888, false)
+                    }
+                }
+            } catch (_: Exception) {
+                // Try the secondary public OSM raster host.
+            } finally {
+                connection.disconnect()
             }
-        } finally {
-            connection.disconnect()
         }
+        return null
     }
 
     private fun valid(lat: Double, lon: Double) =
