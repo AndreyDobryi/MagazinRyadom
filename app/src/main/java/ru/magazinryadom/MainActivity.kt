@@ -94,9 +94,9 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi(savedInstanceState)
-        // Keep a manually selected point between launches. This is important when
-        // the phone reports a clearly wrong GPS position (for example, an airport).
-        restoreManualLocationOrLocate()
+        // Each launch starts with a fresh GPS request. A previously entered
+        // manual point must never silently replace the phone's current location.
+        locate()
     }
 
     private fun buildUi(savedInstanceState: Bundle?) {
@@ -678,6 +678,13 @@ class MainActivity : Activity() {
 
     private fun locate() {
         mapPage.cancelPointPick()
+        // Explicit GPS refresh exits manual mode and discards any old in-memory fix.
+        manualLocationMode = false
+        currentLocation = null
+        selectedStore = null
+        routeButton.isEnabled = false
+        lastRouteLocation = null
+        lastNetworkLocation = null
         if (!hasLocationPermission()) {
             requestLocationPermission()
             return
@@ -717,21 +724,11 @@ class MainActivity : Activity() {
     }
 
     private fun useSavedManualLocationOrWait(message: String) {
-        val prefs = getSharedPreferences("manual_location", MODE_PRIVATE)
-        val lat = prefs.getString("lat", null)?.toDoubleOrNull()
-        val lon = prefs.getString("lon", null)?.toDoubleOrNull()
-        if (lat != null && lon != null && lat in -90.0..90.0 && lon in -180.0..180.0) {
-            val saved = Location("manual_saved").apply {
-                latitude = lat; longitude = lon; accuracy = 0f; time = System.currentTimeMillis()
-            }
-            setCurrentLocation(saved, manual = true)
-            info.text = "Используем сохранённую вручную точку: ${prefs.getString("label", "место")}. $message"
-            val network = getSharedPreferences("chosen", MODE_PRIVATE).getString("network", null)
-            if (!network.isNullOrBlank()) { input.setText(network); searchStores(network) }
-        } else {
-            info.text = message
-            startLiveLocation()
-        }
+        // Do not silently reuse a manual point after GPS failure: it may be an old
+        // address or a location from a previous trip. Keep waiting for a fresh fix.
+        currentLocation = null
+        info.text = message
+        startLiveLocation()
     }
 
     private fun setCurrentLocation(location: Location, manual: Boolean = false) {
