@@ -147,6 +147,18 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
                     true
                 } else false
             }
+            var fallbackStyleUsed = false
+            mapView.addOnDidFailLoadingMapListener { _ ->
+                // If OpenFreeMap's vector tiles fail, retry with another free vector style.
+                if (!fallbackStyleUsed) {
+                    fallbackStyleUsed = true
+                    styleReady = false
+                    mapboxMap.setStyle(Style.Builder().fromUri("https://basemaps.cartocdn.com/gl/positron-gl-style/style.json")) {
+                        styleReady = true
+                        renderPending()
+                    }
+                }
+            }
             mapboxMap.setStyle(Style.Builder().fromUri("https://tiles.openfreemap.org/styles/bright")) {
                 styleReady = true
                 renderPending()
