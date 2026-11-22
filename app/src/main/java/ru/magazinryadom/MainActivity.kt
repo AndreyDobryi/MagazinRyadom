@@ -42,6 +42,8 @@ class MainActivity : Activity() {
     private lateinit var routeButton: Button
     private lateinit var mapPage: MapPage
     private var currentLocation: Location? = null
+    // A cold-start GPS fix is provisional until a second nearby fix confirms it.
+    private var pendingGpsLocation: Location? = null
     private var selectedStore: Store? = null
     private var selectedNetwork: String = ""
     private var networkRefreshRunning = false
@@ -66,6 +68,22 @@ class MainActivity : Activity() {
             if (isGpsJump(fresh)) {
                 info.text = "GPS выдал скачок координат. Игнорируем эту точку и ждём подтверждения реального местоположения."
                 return
+            }
+            if (currentLocation == null) {
+                val pending = pendingGpsLocation
+                if (pending == null) {
+                    pendingGpsLocation = Location(fresh)
+                    info.text = "Получили первую GPS-точку. Проверяем её по следующему измерению…"
+                    return
+                }
+                val agreementLimit = maxOf(100f, pending.accuracy + fresh.accuracy)
+                if (pending.distanceTo(fresh) > agreementLimit) {
+                    // A single outlier must not move the user across the map.
+                    pendingGpsLocation = Location(fresh)
+                    info.text = "GPS пока нестабилен. Проверяем следующую точку…"
+                    return
+                }
+                pendingGpsLocation = null
             }
             currentLocation = fresh
             getSharedPreferences("chosen", MODE_PRIVATE).edit()
@@ -755,6 +773,7 @@ class MainActivity : Activity() {
         // Explicit GPS refresh exits manual mode and discards any old in-memory fix.
         manualLocationMode = false
         currentLocation = null
+        pendingGpsLocation = null
         selectedStore = null
         routeButton.isEnabled = false
         lastRouteLocation = null
@@ -780,19 +799,11 @@ class MainActivity : Activity() {
                             useSavedManualLocationOrWait("Сетевое местоположение пока неточное или координаты подозрительные. Ждём более надёжную точку; можно указать место вручную.")
                             startLiveLocation()
                         } else {
-                            getSharedPreferences("manual_location", MODE_PRIVATE).edit().clear().apply()
-                            getSharedPreferences("chosen", MODE_PRIVATE).edit()
-                                .putString("gps_lat", location.latitude.toString())
-                                .putString("gps_lon", location.longitude.toString())
-                                .putLong("gps_time", System.currentTimeMillis())
-                                .apply()
-                            setCurrentLocation(location, manual = false)
+                            // Never trust one cold-start fix on its own: the live callback
+                            // must confirm it with another nearby measurement before use.
+                            pendingGpsLocation = Location(location)
+                            info.text = "Первая GPS-точка получена. Проверяем стабильность координат…"
                             startLiveLocation()
-                            val savedNetwork = getSharedPreferences("chosen", MODE_PRIVATE).getString("network", null)
-                            if (!savedNetwork.isNullOrBlank()) {
-                                input.setText(savedNetwork)
-                                searchStores(savedNetwork)
-                            }
                         }
                     }
                 }
