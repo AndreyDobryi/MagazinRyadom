@@ -51,6 +51,22 @@ class RouteLocationService : Service() {
                 val moved = previous.distanceTo(location)
                 val allowed = 250.0 + (elapsed / 1000.0) * 55.0 + location.accuracy.coerceAtLeast(0f) * 2.0
                 if (moved > allowed) return
+            } else {
+                // On service startup, compare against the last accepted app GPS fix.
+                // This prevents the background service from accepting a one-off airport jump.
+                val prefs = getSharedPreferences("chosen", MODE_PRIVATE)
+                val oldLat = prefs.getString("gps_lat", null)?.toDoubleOrNull()
+                val oldLon = prefs.getString("gps_lon", null)?.toDoubleOrNull()
+                val oldTime = prefs.getLong("gps_time", 0L)
+                val elapsed = System.currentTimeMillis() - oldTime
+                if (oldLat != null && oldLon != null && elapsed in 1L..600_000L) {
+                    val baseline = Location("last_accepted_gps").apply {
+                        latitude = oldLat
+                        longitude = oldLon
+                    }
+                    val allowed = 250.0 + (elapsed / 1000.0) * 55.0 + location.accuracy.coerceAtLeast(0f) * 2.0
+                    if (baseline.distanceTo(location) > allowed) return
+                }
             }
             lastLocation = Location(location)
             getSharedPreferences("chosen", MODE_PRIVATE).edit()
