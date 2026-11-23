@@ -64,7 +64,11 @@ class MainActivity : Activity() {
             if (manualLocationMode) return
             // Reject obviously old fixes; never move the map back to a cached airport coordinate.
             val age = System.currentTimeMillis() - fresh.time
-            if (age > 45_000L || age < -15_000L || fresh.accuracy > 40f || isMockLocation(fresh)) return
+            if (age > 45_000L || age < -15_000L || isMockLocation(fresh)) return
+            if (fresh.accuracy > 40f) {
+                info.text = "GPS пока неточный (±${fresh.accuracy.roundToInt()} м). Ждём более точные и стабильные координаты…"
+                return
+            }
             if (isGpsJump(fresh)) {
                 info.text = "GPS выдал скачок координат. Игнорируем эту точку и ждём подтверждения реального местоположения."
                 return
@@ -111,7 +115,7 @@ class MainActivity : Activity() {
                 refreshRouteForMovement(fresh, target)
             }
             val networkMoved = lastNetworkLocation?.distanceTo(fresh) ?: Float.MAX_VALUE
-            if (selectedNetwork.isNotBlank() && networkMoved >= 100f && now - lastNetworkRefreshAt >= 120000L) {
+            if (selectedNetwork.isNotBlank() && networkMoved >= 30f && now - lastNetworkRefreshAt >= 45000L) {
                 lastNetworkLocation = Location(fresh)
                 refreshNearestNetwork(fresh, selectedNetwork)
             }
@@ -869,9 +873,9 @@ class MainActivity : Activity() {
 
     private fun startLiveLocation() {
         if (manualLocationMode || isTrackingLocation || !hasLocationPermission()) return
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 6000L)
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 3000L)
             .setMinUpdateIntervalMillis(3000L)
-            .setMinUpdateDistanceMeters(8f)
+            .setMinUpdateDistanceMeters(0f)
             .setWaitForAccurateLocation(false)
             .build()
         try {
@@ -940,8 +944,20 @@ class MainActivity : Activity() {
             runOnUiThread {
                 networkRefreshRunning = false
                 if (selectedNetwork == network && nearest != null) {
+                    val latest = currentLocation ?: location
                     val current = selectedStore
-                    if (current == null || current.lat != nearest.lat || current.lon != nearest.lon) {
+                    val currentDistance = current?.let {
+                        StoreRepository.distance(latest.latitude, latest.longitude, it.lat, it.lon)
+                    } ?: Double.MAX_VALUE
+                    val candidateDistance = StoreRepository.distance(
+                        latest.latitude, latest.longitude, nearest.lat, nearest.lon
+                    )
+                    // Prevent route oscillation: switch only when another branch is
+                    // meaningfully closer, not because of a few metres of GPS drift.
+                    if (current == null ||
+                        ((current.lat != nearest.lat || current.lon != nearest.lon) &&
+                            candidateDistance + 75.0 < currentDistance)
+                    ) {
                         chooseStore(nearest, network)
                     }
                 }
