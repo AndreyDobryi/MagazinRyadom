@@ -41,9 +41,10 @@ class RouteLocationService : Service() {
         override fun onLocationResult(result: LocationResult) {
             val location = result.lastLocation ?: return
             val age = System.currentTimeMillis() - location.time
-            if (age > 45_000L || age < -15_000L || location.accuracy > 40f ||
+            if (age > 45_000L || age < -15_000L ||
                 (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && location.isMock)
             ) return
+            if (location.accuracy > 40f) return
 
             val previous = lastLocation
             if (previous != null) {
@@ -100,7 +101,7 @@ class RouteLocationService : Service() {
                 rebuildRoute(location, target)
             }
             val networkMoved = lastNetworkLocation?.distanceTo(location) ?: Float.MAX_VALUE
-            if (networkMoved >= 100f && now - lastNetworkRefreshAt >= 120_000L) {
+            if (networkMoved >= 30f && now - lastNetworkRefreshAt >= 45_000L) {
                 lastNetworkLocation = Location(location)
                 refreshNearest(location, network)
             }
@@ -134,9 +135,9 @@ class RouteLocationService : Service() {
             stopSelf()
             return
         }
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 6_000L)
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 3_000L)
             .setMinUpdateIntervalMillis(3_000L)
-            .setMinUpdateDistanceMeters(8f)
+            .setMinUpdateDistanceMeters(0f)
             .setWaitForAccurateLocation(false)
             .build()
         try {
@@ -160,8 +161,15 @@ class RouteLocationService : Service() {
                     val prefs = getSharedPreferences("chosen", MODE_PRIVATE)
                     val oldLat = prefs.getString("lat", null)?.toDoubleOrNull()
                     val oldLon = prefs.getString("lon", null)?.toDoubleOrNull()
+                    val currentDistance = if (oldLat != null && oldLon != null)
+                        StoreRepository.distance(location.latitude, location.longitude, oldLat, oldLon)
+                    else Double.MAX_VALUE
+                    val candidateDistance = StoreRepository.distance(
+                        location.latitude, location.longitude, nearest.lat, nearest.lon
+                    )
                     if (oldLat == null || oldLon == null ||
-                        StoreRepository.distance(oldLat, oldLon, nearest.lat, nearest.lon) > 20.0
+                        (StoreRepository.distance(oldLat, oldLon, nearest.lat, nearest.lon) > 20.0 &&
+                            candidateDistance + 75.0 < currentDistance)
                     ) {
                         prefs.edit()
                             .putString("name", nearest.name)
