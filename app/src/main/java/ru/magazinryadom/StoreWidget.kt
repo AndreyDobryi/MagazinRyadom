@@ -14,7 +14,12 @@ class StoreWidget : AppWidgetProvider() {
     override fun onUpdate(context: Context, manager: AppWidgetManager, appWidgetIds: IntArray) = update(context)
 
     companion object {
-        fun update(context: Context) {
+        fun update(context: Context) = updateInternal(context, updateMap = true)
+
+        /** Refresh text/distance without decoding or replacing the cached map image. */
+        fun updateLocation(context: Context) = updateInternal(context, updateMap = false)
+
+        private fun updateInternal(context: Context, updateMap: Boolean) {
             val manager = AppWidgetManager.getInstance(context)
             val ids = manager.getAppWidgetIds(ComponentName(context, StoreWidget::class.java))
             val prefs = context.getSharedPreferences("chosen", Context.MODE_PRIVATE)
@@ -39,10 +44,12 @@ class StoreWidget : AppWidgetProvider() {
                 }
                 views.setTextViewText(R.id.widget_store_details, details)
 
-                val mapPath = prefs.getString("map", null)
-                val mapBitmap = mapPath?.let { BitmapFactory.decodeFile(it) }
-                if (mapBitmap != null) views.setImageViewBitmap(R.id.widget_map, mapBitmap)
-                else views.setImageViewResource(R.id.widget_map, android.R.color.darker_gray)
+                if (updateMap) {
+                    val mapPath = prefs.getString("map", null)
+                    val mapBitmap = mapPath?.let { BitmapFactory.decodeFile(it) }
+                    if (mapBitmap != null) views.setImageViewBitmap(R.id.widget_map, mapBitmap)
+                    else views.setImageViewResource(R.id.widget_map, android.R.color.darker_gray)
+                }
 
                 // The launcher widget is a snapshot; tapping its map opens the live,
                 // draggable MapLibre map and asks the app to refresh the current location.
