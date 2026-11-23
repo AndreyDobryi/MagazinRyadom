@@ -96,6 +96,16 @@ class RouteLocationService : Service() {
                 )
             } else null
 
+            // Update the widget's live distance on every accepted GPS fix.
+            // The cached map bitmap is deliberately left untouched here; it is
+            // regenerated separately when the route is refreshed.
+            if (target != null) {
+                prefs.edit()
+                    .putString("distance", formatDistance(target.distance))
+                    .apply()
+                StoreWidget.updateLocation(this)
+            }
+
             val routeMoved = lastRouteLocation?.distanceTo(location) ?: Float.MAX_VALUE
             if (target != null && routeMoved >= 30f && now - lastRouteRefreshAt >= 25_000L) {
                 rebuildRoute(location, target)
