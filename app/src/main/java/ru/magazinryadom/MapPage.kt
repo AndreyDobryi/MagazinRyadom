@@ -15,6 +15,7 @@ import android.widget.TextView
 import org.maplibre.android.MapLibre
 import org.maplibre.android.annotations.Icon
 import org.maplibre.android.annotations.IconFactory
+import org.maplibre.android.annotations.Marker
 import org.maplibre.android.annotations.MarkerOptions
 import org.maplibre.android.annotations.PolylineOptions
 import org.maplibre.android.camera.CameraPosition
@@ -37,6 +38,7 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
     private var pendingStores: List<Store> = emptyList()
     private var pendingRoute: List<Pair<Double, Double>> = emptyList()
     private var pointPickListener: ((Double, Double) -> Unit)? = null
+    private var userMarker: Marker? = null
     private var userMarkerIcon: Icon? = null
     private var storeMarkerIcon: Icon? = null
 
@@ -176,14 +178,25 @@ class MapPage(context: Context, savedInstanceState: android.os.Bundle? = null) {
         renderPending()
     }
 
+    /** Update the blue location marker on every accepted GPS fix without rebuilding the route. */
+    fun updateUserLocation(latitude: Double, longitude: Double) {
+        val point = LatLng(latitude, longitude)
+        pendingUser = point
+        userMarker?.position = point
+        if (followUser) {
+            val zoom = (map?.cameraPosition?.zoom ?: 17.3).coerceAtLeast(17.3)
+            map?.animateCamera(CameraUpdateFactory.newLatLngZoom(point, zoom))
+        }
+    }
+
     private fun renderPending() {
         val activeMap = map ?: return
         if (!styleReady) return
         val user = pendingUser ?: return
         activeMap.clear()
-        val userMarker = MarkerOptions().position(user).title("Вы здесь")
-        userMarkerIcon?.let { userMarker.icon(it) }
-        activeMap.addMarker(userMarker)
+        val markerOptions = MarkerOptions().position(user).title("Вы здесь")
+        userMarkerIcon?.let { markerOptions.icon(it) }
+        userMarker = activeMap.addMarker(markerOptions)
         if (pendingRoute.size >= 2) {
             val points = pendingRoute.map { LatLng(it.first, it.second) }
             activeMap.addPolyline(
