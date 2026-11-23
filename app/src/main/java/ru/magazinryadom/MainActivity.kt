@@ -90,6 +90,7 @@ class MainActivity : Activity() {
                 pendingGpsLocation = null
             }
             currentLocation = fresh
+            mapPage.updateUserLocation(fresh.latitude, fresh.longitude)
             getSharedPreferences("chosen", MODE_PRIVATE).edit()
                 .putString("user_lat", fresh.latitude.toString())
                 .putString("user_lon", fresh.longitude.toString())
