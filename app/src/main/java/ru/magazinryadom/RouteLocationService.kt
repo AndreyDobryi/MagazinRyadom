@@ -103,7 +103,7 @@ class RouteLocationService : Service() {
                 prefs.edit()
                     .putString("distance", formatDistance(target.distance))
                     .apply()
-                StoreWidget.updateLocation(this)
+                StoreWidget.updateLocation(this@RouteLocationService)
             }
 
             val routeMoved = lastRouteLocation?.distanceTo(location) ?: Float.MAX_VALUE
